@@ -42,6 +42,7 @@ func (m *Mapping) ContainerPort() Port {
 	return Port{Number: m.ContainerPortNumber, Protocol: m.Protocol}
 }
 
+// TargetAddress returns the target address in format <host>:<port>.
 func (m *Mapping) TargetAddress() string {
 	return fmt.Sprintf("%s:%d", m.TargetIP, m.TargetPortNumber)
 }

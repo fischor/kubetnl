@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,7 @@ import (
 	"k8s.io/cli-runtime/pkg/printers"
 	"k8s.io/cli-runtime/pkg/resource"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	cmdwait "k8s.io/kubectl/pkg/cmd/wait"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -37,7 +39,7 @@ type CleanupOptions struct {
 }
 
 var (
-	cleanupLog = templates.LongDesc(`
+	cleanupLong = templates.LongDesc(`
 		Cleanup all errneously leftover resources created by dew.
 
 		Use cleanup in case there are resources left for previous runs.
@@ -61,9 +63,10 @@ func NewCleanupCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *
 	}
 
 	cmd := &cobra.Command{
-		Use:   "cleanup [options]",
-		Short: "Cleanup all errneously leftover resources created by dew",
-		Long:  cleanupLog,
+		Use:     "cleanup [options]",
+		Short:   "Cleanup all errneously leftover resources created by dew",
+		Long:    cleanupLong,
+		Example: cleanupExamples,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f))
 			cmdutil.CheckErr(o.Run(cmd.Context()))
@@ -134,18 +137,14 @@ func (o *CleanupOptions) Run(ctx context.Context) error {
 		// Delete resource.
 		response, err := resource.
 			NewHelper(info.Client, info.Mapping).
-			// DryRun(o.DryRunStrategy == cmdutil.DryRunServer).
 			DeleteWithOptions(info.Namespace, info.Name, options)
 		if err != nil {
-			// return nil, cmdutil.AddSourceToErr("deleting", info.Source, err)
 			// TODO: returning the error for now, but we should try
 			// the other ones and collect the error
 			return err
 		}
 		if !o.Quiet {
-			fmt.Fprintf(o.Out, "%s\n", info.ObjectName())
-			// TOOD receive this one
-			// o.PrintObj(info)
+			o.PrintObj(info)
 		}
 		resourceLocation := cmdwait.ResourceLocation{
 			GroupResource: info.Mapping.Resource.GroupResource(),
@@ -159,7 +158,7 @@ func (o *CleanupOptions) Run(ctx context.Context) error {
 		responseMetadata, err := meta.Accessor(response)
 		if err != nil {
 			// we don't have UID, but we didn't fail the delete, next best thing is just skipping the UID
-			// klog.V(1).Info(err)
+			klog.V(1).Info(err)
 			return nil
 		}
 		uidMap[resourceLocation] = responseMetadata.GetUID()
@@ -189,8 +188,21 @@ func (o *CleanupOptions) Run(ctx context.Context) error {
 	if errors.IsForbidden(err) || errors.IsMethodNotSupported(err) {
 		// if we're forbidden from waiting, we shouldn't fail.
 		// if the resource doesn't support a verb we need, we shouldn't fail.
-		// klog.V(1).Info(err)
+		klog.V(1).Info(err)
 		return nil
 	}
 	return err
+}
+
+func (o *CleanupOptions) PrintObj(info *resource.Info) {
+	groupKind := info.Mapping.GroupVersionKind
+	kindString := fmt.Sprintf("%s.%s", strings.ToLower(groupKind.Kind), groupKind.Group)
+	if len(groupKind.Group) == 0 {
+		kindString = strings.ToLower(groupKind.Kind)
+	}
+	operation := "deleted"
+	if o.GracePeriod == 0 {
+		operation = "force deleted"
+	}
+	fmt.Fprintf(o.Out, "%s \"%s\" %s\n", kindString, info.Name, operation)
 }

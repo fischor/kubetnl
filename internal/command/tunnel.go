@@ -1,11 +1,13 @@
 package command
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/fischor/dew/internal/interruptcontext"
@@ -26,6 +28,7 @@ import (
 	"k8s.io/client-go/tools/portforward"
 	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/transport/spdy"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -41,7 +44,6 @@ type TunnelOptions struct {
 	// Name of the tunnel. This will also be the name of the pod and service.
 	Name string
 
-	// Required.
 	RawPortMappings []string
 
 	PortMappings []port.Mapping
@@ -58,14 +60,20 @@ type TunnelOptions struct {
 
 	RESTConfig *rest.Config
 	ClientSet  *kubernetes.Clientset
-
-	GraceSignal <-chan struct{}
 }
 
 var (
 	tunnelLong = templates.LongDesc(`
-		Forward TCP traffic from a container running in Kubernetes to another host.
-	`)
+		Forward TCP traffic from within a cluster to another host.
+
+		A service and pod gets created in the cluster named like the soley positional 
+		argument passed to the tunnel command. The pod runs a SSH server. A portforward
+		connection to the pod is establish. Using the forwarded port, a SSH connection
+		to the pod gets established. That SSH connection is used to tunnel any traffic
+		the pod received on the ports passed with the --publish/-p flag.
+
+		To stop the tunnel use CTRL+C once. This will gracefully close all connections
+		and cleanup the created resources in the cluster.`)
 
 	tunnelExample = templates.LongDesc(`
 		# Tunnel to the local port 8080 from container port 80.
@@ -79,8 +87,7 @@ var (
 )
 
 var (
-	// dewImage            = "cr.mycom.com:5000/dew-server"
-	dewImage            = "ghcr.io/linuxserver/openssh-server"
+	dewImage            = "cr.mycom.com:5000/dew-server"
 	dewPodContainerName = "main"
 	dewServerCommand    = "dew-server"
 )
@@ -96,9 +103,10 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 	}
 
 	cmd := &cobra.Command{
-		Use:   "tunnel",
-		Short: "Tunnel traffic received on pod to your local machine",
-		Long:  tunnelLong,
+		Use:     "tunnel",
+		Short:   "Tunnel TCP traffic from within a cluster to another host",
+		Long:    tunnelLong,
+		Example: tunnelExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, args))
 			ctx, graceCh := interruptcontext.WithGrafulInterrupt(cmd.Context())
@@ -106,7 +114,7 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&o.RawPortMappings, "publish", "p", nil, "The TCP ports to pipe. Format <target>:<container>/<proto>")
+	cmd.Flags().StringSliceVarP(&o.RawPortMappings, "publish", "p", nil, "The TCP ports to tunnel. Format <target>:<container>")
 
 	return cmd
 }
@@ -145,57 +153,26 @@ func (o *TunnelOptions) Complete(f cmdutil.Factory, args []string) error {
 	return nil
 }
 
-// dew -p <local>:<container>/<protocol> <service>
-
-// dew <service/pod-name> -p 8080:8080 -p 7070:7070
-//
-// If there is already a service with that name and a dew annotation,
-// we can still try to connect to it.
-
-// Run runs the client command.
-//
-// ctx is closed when the client presses CTRL+C twice.
 func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error {
-	configmapClient := o.ClientSet.CoreV1().ConfigMaps(o.Namespace)
-	configmap := getConfigMap(o.Name, o.RemoteSSHPort)
-	log.Printf("Creating configmap \"%s\"...\n", o.Name)
-	configmap, err := configmapClient.Create(ctx, configmap, metav1.CreateOptions{})
-	if err != nil {
-		return fmt.Errorf("error creating configmap: %v", err)
-	}
-	log.Printf("Created configmap \"%s\".", configmap.GetObjectMeta().GetName())
-	defer func() {
-		log.Printf("Deleting configmap %s ...", o.Name)
-		err := configmapClient.Delete(ctx, o.Name, metav1.DeleteOptions{})
-		if err != nil {
-			log.Printf("error configmap service: %v\n", err)
-		}
-	}()
-
-	select {
-	case <-graceCh:
-		return interruptcontext.Interrupted
-	default:
-	}
-
 	// Create the service for incoming traffic within the cluster. The
-	// services aceppts traffic on all ports that are in mentioned in
-	// o.PortMappings[*].ContainerPortNumber using the
-	// specied protocol.
+	// services accepts traffic on all ports that are in mentioned in
+	// o.PortMappings[*].ContainerPortNumber using the specied protocol.
 	serviceClient := o.ClientSet.CoreV1().Services(o.Namespace)
 	svcPorts := servicePorts(o.PortMappings)
 	service := getService(o.Name, svcPorts)
-	log.Printf("Creating service \"%s\"...\n", o.Name)
-	service, err = serviceClient.Create(ctx, service, metav1.CreateOptions{})
+	klog.V(2).Infof("Creating service \"%s\"...", o.Name)
+	service, err := serviceClient.Create(ctx, service, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("error creating service: %v", err)
 	}
-	log.Printf("Created service \"%s\".", service.GetObjectMeta().GetName())
+	klog.V(3).Infof("Created service \"%s\".", service.GetObjectMeta().GetName())
 	defer interruptcontext.DoGraceful(ctx, func() {
-		log.Printf("Deleting service %s ...", service.Name)
-		err := serviceClient.Delete(ctx, service.Name, metav1.DeleteOptions{})
+		klog.V(2).Infof("Deleting service %s ...", service.Name)
+		deletePolicy := metav1.DeletePropagationForeground
+		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
+		err := serviceClient.Delete(ctx, service.Name, deleteOptions)
 		if err != nil {
-			log.Printf("error deleting service: %v\n", err)
+			klog.Warningf("error deleting service: %v", err)
 		}
 	})
 
@@ -207,26 +184,27 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 
 	// Create the service for incoming traffic within the cluster. The pod
 	// exposes all ports that are in mentioned in
-	// o.PortMappings[*].ContainerPortNumber using the
-	// specied protocol. Additionally it exposes port 2222 (or 2223 if
-	// 2222 is used already) for ssh connections.
+	// o.PortMappings[*].ContainerPortNumber using the specied protocol.
+	// Additionally it exposes the port for the ssh conn.
 	ports := append(containerPorts(o.PortMappings), corev1.ContainerPort{
 		Name:          "ssh",
 		ContainerPort: int32(o.RemoteSSHPort),
 	})
 	podClient := o.ClientSet.CoreV1().Pods(o.Namespace)
-	pod := getPod(o.Name, ports)
-	log.Printf("Creating pod \"%s\"...\n", o.Name)
+	pod := getPod(o.Name, o.RemoteSSHPort, ports)
+	klog.V(2).Infof("Creating pod \"%s\"...", o.Name)
 	pod, err = podClient.Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("error creating pod: %v", err)
 	}
-	log.Printf("Created pod \"%s\".", service.GetObjectMeta().GetName())
+	klog.V(3).Infof("Created pod \"%s\".", service.GetObjectMeta().GetName())
 	defer interruptcontext.DoGraceful(ctx, func() {
-		log.Printf("Deleting pod %s ...", pod.Name)
-		err := podClient.Delete(ctx, pod.Name, metav1.DeleteOptions{})
+		klog.V(2).Infof("Deleting pod %s ...", pod.Name)
+		deletePolicy := metav1.DeletePropagationForeground
+		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
+		err := podClient.Delete(ctx, pod.Name, deleteOptions)
 		if err != nil {
-			log.Printf("error deleting pod: %v. That pod probably still runs. You can use dew cleanup to clean up all resources created by dew.", err)
+			klog.Warningf("error deleting pod: %v. That pod probably still runs. You can use dew cleanup to clean up all resources created by dew.", err)
 		}
 	})
 
@@ -242,7 +220,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	watchOptions.ResourceVersion = pod.GetResourceVersion()
 	podWatch, err := podClient.Watch(ctx, watchOptions)
 	if err != nil {
-		return fmt.Errorf("error watching pod: %v", err)
+		return fmt.Errorf("error watching pod %s: %v", o.Name, err)
 	}
 	// TODO In case of graceful interrupt, wcancel() and return cmd.ErrInterrupted
 	// if err == wctx.Err (== context.Cancelled).
@@ -258,7 +236,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		}
 		return fmt.Errorf("error waiting for pod ready: received unknown error \"%f\"", err)
 	}
-	log.Printf("Pod ready..\n")
+	klog.V(2).Infof("Pod ready..\n")
 
 	select {
 	case <-graceCh:
@@ -266,11 +244,11 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	default:
 	}
 
-	pfwdReadyCh := make(chan struct{}) // closed when portforwarding ready?
+	pfwdReadyCh := make(chan struct{}) // Closed when portforwarding ready.
 	pfwdStopCh := make(chan struct{}, 1)
-	pfwdDoneCh := make(chan struct{}) // close when portforwarding exits.
+	pfwdDoneCh := make(chan struct{}) // Closed when portforwarding exits.
 	go func() error {
-		// Do a portforwarding to the opened SSH port.
+		// Do a portforwarding to the pods exposed SSH port.
 		req := o.ClientSet.CoreV1().RESTClient().Post().
 			Resource("pods").
 			Namespace(pod.Namespace).
@@ -281,32 +259,26 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 			return err
 		}
 		dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
-		fw, err := portforward.NewOnAddresses(
-			dialer,
-			[]string{"localhost"},
-			[]string{fmt.Sprintf("%d:%d", o.LocalSSHPort, o.RemoteSSHPort)},
-			pfwdStopCh,
-			pfwdReadyCh,
-			o.Out,    // TODO: var bout bytes.Buffer; buffOut := bufio.NewWriter(&berr)
-			o.ErrOut, // TODO: var berr bytes.BUffer; buffErr := bufio.NewWriter(&berr)
-		)
+		pfwdPorts := []string{fmt.Sprintf("%d:%d", o.LocalSSHPort, o.RemoteSSHPort)}
+		var bout, berr bytes.Buffer
+		pfwdOut := bufio.NewWriter(&bout)
+		pfwdErr := bufio.NewWriter(&berr)
+		pfwd, err := portforward.New(dialer, pfwdPorts, pfwdStopCh, pfwdReadyCh, pfwdOut, pfwdErr)
 		if err != nil {
 			return err
 		}
-		err = fw.ForwardPorts() // blocks
+		err = pfwd.ForwardPorts() // blocks
 		if err != nil {
-			return fmt.Errorf("error Forwarding SSH port: %v\n", err)
+			return fmt.Errorf("error port-forwarding from :%d --> %d: %v", o.LocalSSHPort, o.RemoteSSHPort, err)
 		}
 		// If this errors, also everything following will error.
 		close(pfwdDoneCh)
 		return nil
 	}()
 	defer interruptcontext.DoGraceful(ctx, func() {
-		// TODO: if portforward somewhat hangs this will block cleaning up
-		// k8s pod and service.
 		close(pfwdStopCh)
 		<-pfwdDoneCh
-		log.Println("port forwarding closed")
+		klog.V(2).Infof("port-forwarding closed")
 	})
 
 	select {
@@ -315,15 +287,14 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	case <-graceCh:
 		return interruptcontext.Interrupted
 	case <-pfwdReadyCh:
-		log.Printf("port forwarding  is ready: forwarding :%d --> pod %d\n", o.LocalSSHPort, o.RemoteSSHPort)
+		klog.V(2).Infof("port-forwarding from :%d --> %d", o.LocalSSHPort, o.RemoteSSHPort)
 	}
 
-	// TODO: need to do retries here. It seems the pod does not accept
-	// SSH connections also its ready.
-	<-time.After(5 * time.Second)
+	// TODO: need to do retries here. It seems the pod does not accept SSH
+	// connections also its ready.
+	<-time.After(2 * time.Second)
 
-	// The pod is now ready. Execute the command.
-	// Establish ssh connection over the forwarded port.
+	// Establish SSH connection over the forwarded port.
 	sshConfig := &ssh.ClientConfig{
 		User: "user",
 		Auth: []ssh.AuthMethod{
@@ -337,14 +308,14 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	sshAddr := fmt.Sprintf("localhost:%d", o.LocalSSHPort)
 	sshClient, err := ssh.Dial("tcp", sshAddr, sshConfig)
 	if err != nil {
-		log.Printf("error ssh.Dial:%v\n", err)
-		return err
+		klog.Errorf("error dialing ssh (%s): %v", sshAddr, err)
+		return fmt.Errorf("error dialing ssh: %v", err)
 	}
 	defer interruptcontext.DoGraceful(ctx, func() {
-		log.Printf("ssl connection closed 127.0.0.1:%d\n", o.LocalSSHPort)
 		sshClient.Close()
+		klog.V(2).Info("ssl connection (%s) closed", sshAddr)
 	})
-	log.Printf("ssl connection ready 127.0.0.1:%d\n", o.LocalSSHPort)
+	klog.V(2).Infof("ssl connection (%s) ready", sshAddr)
 
 	select {
 	case <-graceCh:
@@ -355,8 +326,8 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	// Setup tunnels.
 	var tunnels []*tunnel.Tunnel
 	for _, m := range o.PortMappings {
-		// TODO: we could check for interrupt and ctx.Done in every iteration
-		// TODO support remote ips: Note that it does not work without the 0.0.0.0 here.
+		// TODO: Check for interrupt and ctx.Done in every iteration.
+		// TODO Support remote ips: Note that it does not work without the 0.0.0.0 here.
 		remote := fmt.Sprintf("0.0.0.0:%d", m.ContainerPortNumber)
 		forward := m.TargetAddress()
 		// Create listener for the tunnel. The listener gets closed
@@ -376,13 +347,14 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 						<-t.Done()
 					}
 				}
+				fmt.Fprintf(o.Out, "Failed to tunnel from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, forward)
 				return fmt.Errorf("failed to setup listener from %s to %s: %v", remote, forward, err)
 			}
-			log.Printf("failed to setup listener from %s to %s: %v", remote, forward, err)
+			klog.Errorf("failed to setup listener from %s to %s: %v", remote, forward, err)
 		}
 		t := tunnel.New(lis, forward)
 		tunnels = append(tunnels, t)
-		log.Printf("tunnel from remove %s to target %s setup\n", remote, forward)
+		fmt.Fprintf(o.Out, "Tunneling from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, forward)
 	}
 
 	// Open tunnels.
@@ -417,28 +389,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	return nil
 }
 
-func getConfigMap(name string, remotePort int) *corev1.ConfigMap {
-	return &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: name,
-			Labels: map[string]string{
-				"io.github.dew": name,
-			},
-		},
-		Data: map[string]string{
-			"ssh-init-gateway.sh": fmt.Sprintf(`#!/bin/bash
-# set -e
-sed -i 's/#Port 22/Port %d/g' /etc/ssh/sshd_config
-sed -i 's/#AllowAgentForwarding yes/AllowAgentForwarding yes/g' /etc/ssh/sshd_config
-sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/g' /etc/ssh/sshd_config
-sed -i 's/GatewayPorts no/GatewayPorts yes/g' /etc/ssh/sshd_config
-sed -i 's/X11Forwarding no/X11Forwarding yes/g' /etc/ssh/sshd_config
-	    `, remotePort),
-		},
-	}
-}
-
-func getPod(name string, ports []corev1.ContainerPort) *corev1.Pod {
+func getPod(name string, sshPort int, ports []corev1.ContainerPort) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -452,24 +403,10 @@ func getPod(name string, ports []corev1.ContainerPort) *corev1.Pod {
 				Image: dewImage,
 				Ports: ports,
 				Env: []corev1.EnvVar{
+					{Name: "PORT", Value: strconv.Itoa(sshPort)},
 					{Name: "PASSWORD_ACCESS", Value: "true"},
 					{Name: "USER_NAME", Value: "user"},
 					{Name: "USER_PASSWORD", Value: "password"},
-				},
-				VolumeMounts: []corev1.VolumeMount{{
-					Name:      "ssh-config",
-					MountPath: "/config/custom-cont-init.d/ssh-init-gateway.sh",
-					SubPath:   "ssh-init-gateway.sh",
-				}},
-			}},
-			Volumes: []corev1.Volume{{
-				Name: "ssh-config",
-				VolumeSource: corev1.VolumeSource{
-					ConfigMap: &corev1.ConfigMapVolumeSource{
-						LocalObjectReference: corev1.LocalObjectReference{
-							Name: name,
-						},
-					},
 				},
 			}},
 		},
@@ -547,6 +484,7 @@ func chooseSSHPort(mm []port.Mapping) (int, error) {
 	if !isInUse(mm, 2222) {
 		return 2222, nil
 	}
+	// TODO: for 22 portforwarding somewhat never works.
 	if !isInUse(mm, 22) {
 		return 22, nil
 	}

@@ -2,8 +2,9 @@ package command
 
 import (
 	"flag"
-	"github.com/spf13/cobra"
 	"io"
+
+	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
@@ -24,7 +25,7 @@ func NewRootCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	_ = &RootOptions{}
 
 	cmd := &cobra.Command{
-		Use:   "dew",
+		Use:   "kubetnl",
 		Short: "Tunnel traffic received on pod to your local machine",
 		Long:  rootLong,
 		Run: func(cmd *cobra.Command, args []string) {

@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/fischor/dew/internal/interruptcontext"
-	"github.com/fischor/dew/internal/port"
-	"github.com/fischor/dew/internal/tunnel"
+	"github.com/fischor/kubetnl/internal/interruptcontext"
+	"github.com/fischor/kubetnl/internal/port"
+	"github.com/fischor/kubetnl/internal/tunnel"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/errgroup"
@@ -33,8 +33,6 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
-// TunnelOptions for a dew client. Value passed as command line arguments and
-// values derived from them.
 type TunnelOptions struct {
 	genericclioptions.IOStreams
 
@@ -87,9 +85,8 @@ var (
 )
 
 var (
-	dewImage            = "cr.mycom.com:5000/dew-server"
-	dewPodContainerName = "main"
-	dewServerCommand    = "dew-server"
+	kubetnlImage            = "cr.mycom.com:5000/kubetnl-server"
+	kubetnlPodContainerName = "main"
 )
 
 // NewTunnelCommand creates a ne tunnel command.
@@ -207,7 +204,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
 		err := podClient.Delete(ctx, pod.Name, deleteOptions)
 		if err != nil {
-			klog.Warningf("error deleting pod: %v. That pod probably still runs. You can use dew cleanup to clean up all resources created by dew.", err)
+			klog.Warningf("error deleting pod: %v. That pod probably still runs. You can use kubetnl cleanup to clean up all resources created by kubetnl.", err)
 		}
 	})
 
@@ -394,13 +391,13 @@ func getPod(name string, sshPort int, ports []corev1.ContainerPort) *corev1.Pod 
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				"io.github.dew": name,
+				"io.github.kubetnl": name,
 			},
 		},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
-				Name:  dewPodContainerName,
-				Image: dewImage,
+				Name:  kubetnlPodContainerName,
+				Image: kubetnlImage,
 				Ports: ports,
 				Env: []corev1.EnvVar{
 					{Name: "PORT", Value: strconv.Itoa(sshPort)},
@@ -418,12 +415,12 @@ func getService(name string, ports []corev1.ServicePort) *corev1.Service {
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				"io.github.dew": name,
+				"io.github.kubetnl": name,
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				"io.github.dew": name,
+				"io.github.kubetnl": name,
 			},
 			Ports: ports,
 		},

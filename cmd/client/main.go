@@ -2,8 +2,9 @@ package main
 
 import (
 	"context"
-	"github.com/fischor/dew/internal/command"
 	"os"
+
+	"github.com/fischor/kubetnl/internal/command"
 )
 
 func main() {

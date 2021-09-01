@@ -40,20 +40,20 @@ type CleanupOptions struct {
 
 var (
 	cleanupLong = templates.LongDesc(`
-		Cleanup all errneously leftover resources created by dew.
+		Cleanup all errneously leftover resources created by kubetnl.
 
 		Use cleanup in case there are resources left for previous runs.
 		Note that if there are active tunnels, this will destroy these.`)
 
 	cleanupExamples = templates.LongDesc(`
 		# Cleanup all resources in the current namespace.
-		dew cleanup
+		kubetnl cleanup
 
 		# Cleanup all resources in the "hello" namespace.
-		dew cleanup -n hello
+		kubetnl cleanup -n hello
 
 		# Cleanup all resources in all namespaces.
-		dew cleanup --all-namespaces`)
+		kubetnl cleanup --all-namespaces`)
 )
 
 func NewCleanupCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
@@ -64,7 +64,7 @@ func NewCleanupCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *
 
 	cmd := &cobra.Command{
 		Use:     "cleanup [options]",
-		Short:   "Cleanup all errneously leftover resources created by dew",
+		Short:   "Cleanup all errneously leftover resources created by kubetnl",
 		Long:    cleanupLong,
 		Example: cleanupExamples,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -97,7 +97,7 @@ func (o *CleanupOptions) Complete(f cmdutil.Factory) (err error) {
 	if err != nil {
 		return err
 	}
-	req, _ := labels.NewRequirement("io.github.dew", selection.Exists, []string{})
+	req, _ := labels.NewRequirement("io.github.kubetnl", selection.Exists, []string{})
 	selector := labels.NewSelector().Add(*req)
 
 	o.Result = f.NewBuilder().

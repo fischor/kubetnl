@@ -1,4 +1,4 @@
-module github.com/fischor/dew
+module github.com/fischor/kubetnl
 
 go 1.16
 

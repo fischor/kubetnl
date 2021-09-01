@@ -45,9 +45,9 @@ func (t *Tunnel) Open() error {
 	// Loop until t.lis is closed.
 	for {
 		var conn net.Conn
-		// t.lis.Accept waits for new connections. Unblocks with an err
-		// if t.lis.Close is called. Earlier accepted connections can
-		// still finish.
+		// t.lis.Accept waits for new connections. Unblocks with an
+		// io.EOF error if t.lis.Close is called. Earlier accepted
+		// connections can still finish.
 		conn, err := t.lis.Accept()
 		if err != nil {
 			// Any net package errors that are assured to be
@@ -57,10 +57,10 @@ func (t *Tunnel) Open() error {
 				log.Printf("tunnel temporary error lis.Accept: %v\n", err)
 				continue
 			}
-			// Closing the underlying ssh connection will cause
-			// t.lis.Accept to return EOF.
-			log.Printf("tunnel fatal error lis.Accept: %v\n", err)
-			t.lis.Close()
+			if err != io.EOF {
+				log.Printf("tunnel fatal error lis.Accept: %v\n", err)
+				t.lis.Close()
+			}
 			handlers.Wait()
 			return err
 		}

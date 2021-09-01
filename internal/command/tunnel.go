@@ -6,14 +6,14 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"sync"
 	"time"
 
+	"github.com/fischor/dew/internal/interruptcontext"
 	"github.com/fischor/dew/internal/port"
-	"github.com/fischor/dew/internal/sshtunnel"
-	"github.com/google/uuid"
+	"github.com/fischor/dew/internal/tunnel"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/sync/errgroup"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
@@ -27,18 +27,19 @@ import (
 	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/transport/spdy"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
+	"k8s.io/kubectl/pkg/util/templates"
 )
 
-// ClientOptions for a dew client. Value passed as command line arguments and
+// TunnelOptions for a dew client. Value passed as command line arguments and
 // values derived from them.
-type ClientOptions struct {
+type TunnelOptions struct {
 	genericclioptions.IOStreams
 
 	Namespace        string
 	EnforceNamespace bool
 
-	// Required.
-	Service string
+	// Name of the tunnel. This will also be the name of the pod and service.
+	Name string
 
 	// Required.
 	RawPortMappings []string
@@ -48,6 +49,8 @@ type ClientOptions struct {
 	// The port in the running container that SSH connections are accepted
 	// on.
 	RemoteSSHPort int
+
+	ContinueOnTunnelError bool
 
 	// The port on the localhost that is used to forward SSH connections to
 	// the remote container.
@@ -60,19 +63,33 @@ type ClientOptions struct {
 }
 
 var (
-	dewImage            = "cr.mycom.com:5000/dew-server"
+	tunnelLong = templates.LongDesc(`
+		Forward TCP traffic from a container running in Kubernetes to another host.
+	`)
+
+	tunnelExample = templates.LongDesc(`
+		# Tunnel to the local port 8080 from container port 80.
+		kubetnl tunnel -p 8080:80 mytunnel
+
+		# Tunnel to port 10.10.10.10:3333 from container port 80.
+		kubetnl tunnel -p 10.10.10.10:3333:80 mytunnel
+
+		# Tunnel to local port 8080 from container port 80 and to local port 9090 from container port 90.
+		kubetnl tunnel -p 8080:80 -p 9090:90 mytunnel`)
+)
+
+var (
+	// dewImage            = "cr.mycom.com:5000/dew-server"
+	dewImage            = "ghcr.io/linuxserver/openssh-server"
 	dewPodContainerName = "main"
 	dewServerCommand    = "dew-server"
-
-	clientLong    = ""
-	clientExample = ""
 )
 
 // NewTunnelCommand creates a ne tunnel command.
 //
 // The tunnel command works with a graceful shutdown.
 func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
-	o := &ClientOptions{
+	o := &TunnelOptions{
 		IOStreams:    streams,
 		Namespace:    corev1.NamespaceDefault,
 		LocalSSHPort: 7154, // TODO: grab one randomly
@@ -81,10 +98,11 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 	cmd := &cobra.Command{
 		Use:   "tunnel",
 		Short: "Tunnel traffic received on pod to your local machine",
-		Long:  clientLong,
+		Long:  tunnelLong,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, args))
-			cmdutil.CheckErr(o.Run(cmd.Context()))
+			ctx, graceCh := interruptcontext.WithGrafulInterrupt(cmd.Context())
+			cmdutil.CheckErr(o.Run(ctx, graceCh))
 		},
 	}
 
@@ -93,11 +111,11 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 	return cmd
 }
 
-func (o *ClientOptions) Complete(f cmdutil.Factory, args []string) error {
+func (o *TunnelOptions) Complete(f cmdutil.Factory, args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("requires exactly one agument, got %d", len(args))
 	}
-	o.Service = args[0]
+	o.Name = args[0]
 
 	if len(o.RawPortMappings) == 0 {
 		return fmt.Errorf("specify one or more ports to tunnel. Use --tcp 8080:8080 or --udp 8080:9090 for example.")
@@ -137,28 +155,28 @@ func (o *ClientOptions) Complete(f cmdutil.Factory, args []string) error {
 // Run runs the client command.
 //
 // ctx is closed when the client presses CTRL+C twice.
-func (o *ClientOptions) Run(ctx context.Context) error {
-	// dewID is attached to the dew pod as a "dew-id" keyed label.
-	// TODO: why needed? Can use the service name instead
-	dewID := "dew-" + uuid.New().String()
-
-	// Create config map for openssh.
-	// TODO: derive an image such that no configmap is necessary.
+func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error {
 	configmapClient := o.ClientSet.CoreV1().ConfigMaps(o.Namespace)
-	configmap := getConfigMap(o.Service, dewID, o.RemoteSSHPort)
-	log.Printf("Creating configmap \"%s\"...\n", o.Service)
+	configmap := getConfigMap(o.Name, o.RemoteSSHPort)
+	log.Printf("Creating configmap \"%s\"...\n", o.Name)
 	configmap, err := configmapClient.Create(ctx, configmap, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("error creating configmap: %v", err)
 	}
 	log.Printf("Created configmap \"%s\".", configmap.GetObjectMeta().GetName())
 	defer func() {
-		log.Printf("Deleting configmap %s ...", o.Service)
-		err := configmapClient.Delete(ctx, o.Service, metav1.DeleteOptions{})
+		log.Printf("Deleting configmap %s ...", o.Name)
+		err := configmapClient.Delete(ctx, o.Name, metav1.DeleteOptions{})
 		if err != nil {
 			log.Printf("error configmap service: %v\n", err)
 		}
 	}()
+
+	select {
+	case <-graceCh:
+		return interruptcontext.Interrupted
+	default:
+	}
 
 	// Create the service for incoming traffic within the cluster. The
 	// services aceppts traffic on all ports that are in mentioned in
@@ -166,62 +184,68 @@ func (o *ClientOptions) Run(ctx context.Context) error {
 	// specied protocol.
 	serviceClient := o.ClientSet.CoreV1().Services(o.Namespace)
 	svcPorts := servicePorts(o.PortMappings)
-	service := getService(o.Service, dewID, svcPorts)
-	log.Printf("Creating service \"%s\"...\n", o.Service)
+	service := getService(o.Name, svcPorts)
+	log.Printf("Creating service \"%s\"...\n", o.Name)
 	service, err = serviceClient.Create(ctx, service, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("error creating service: %v", err)
 	}
 	log.Printf("Created service \"%s\".", service.GetObjectMeta().GetName())
-	defer func() {
+	defer interruptcontext.DoGraceful(ctx, func() {
 		log.Printf("Deleting service %s ...", service.Name)
 		err := serviceClient.Delete(ctx, service.Name, metav1.DeleteOptions{})
 		if err != nil {
 			log.Printf("error deleting service: %v\n", err)
 		}
-	}()
+	})
+
+	select {
+	case <-graceCh:
+		return interruptcontext.Interrupted
+	default:
+	}
 
 	// Create the service for incoming traffic within the cluster. The pod
 	// exposes all ports that are in mentioned in
 	// o.PortMappings[*].ContainerPortNumber using the
 	// specied protocol. Additionally it exposes port 2222 (or 2223 if
 	// 2222 is used already) for ssh connections.
-	dewImage = "ghcr.io/linuxserver/openssh-server"
 	ports := append(containerPorts(o.PortMappings), corev1.ContainerPort{
 		Name:          "ssh",
 		ContainerPort: int32(o.RemoteSSHPort),
 	})
 	podClient := o.ClientSet.CoreV1().Pods(o.Namespace)
-	pod := getPod(o.Service, dewID, ports)
-	log.Printf("Creating pod \"%s\"...\n", o.Service)
+	pod := getPod(o.Name, ports)
+	log.Printf("Creating pod \"%s\"...\n", o.Name)
 	pod, err = podClient.Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		return fmt.Errorf("error creating pod: %v", err)
 	}
 	log.Printf("Created pod \"%s\".", service.GetObjectMeta().GetName())
-	defer func() {
-		// TODO: fails when CTRL+C cancels the ctx
+	defer interruptcontext.DoGraceful(ctx, func() {
 		log.Printf("Deleting pod %s ...", pod.Name)
 		err := podClient.Delete(ctx, pod.Name, metav1.DeleteOptions{})
 		if err != nil {
-			// TODO: write in error message: "there might be pods leftover
-			// use dew cleanup to delete all services and pod for dew (that have a label "dew": "helloworld")"
-			// dew cleanup will ask for confirmation before cleaning up
-			// use -y to omit.
-			log.Printf("error deleting pod: %v\n", err)
+			log.Printf("error deleting pod: %v. That pod probably still runs. You can use dew cleanup to clean up all resources created by dew.", err)
 		}
-	}()
+	})
+
+	select {
+	case <-graceCh:
+		return interruptcontext.Interrupted
+	default:
+	}
 
 	// Wait for the pod to be ready before setting up a SSH connection.
 	watchOptions := metav1.ListOptions{}
-	watchOptions.FieldSelector = fields.OneTermEqualSelector("metadata.name", o.Service).String()
+	watchOptions.FieldSelector = fields.OneTermEqualSelector("metadata.name", o.Name).String()
 	watchOptions.ResourceVersion = pod.GetResourceVersion()
 	podWatch, err := podClient.Watch(ctx, watchOptions)
 	if err != nil {
 		return fmt.Errorf("error watching pod: %v", err)
 	}
-	// TODO: sleep here to assure the pod is ready. Then test if UntilWithoutRetry
-	// will also receive events from before it was called.
+	// TODO In case of graceful interrupt, wcancel() and return cmd.ErrInterrupted
+	// if err == wctx.Err (== context.Cancelled).
 	wctx, wcancel := watchtools.ContextWithOptionalTimeout(context.Background(), 5*time.Minute)
 	_, err = watchtools.UntilWithoutRetry(wctx, podWatch, condPodReady)
 	wcancel()
@@ -236,60 +260,67 @@ func (o *ClientOptions) Run(ctx context.Context) error {
 	}
 	log.Printf("Pod ready..\n")
 
-	// Do a portforwarding to the opened SSH port.
-	req := o.ClientSet.CoreV1().RESTClient().Post().
-		Resource("pods").
-		Namespace(pod.Namespace).
-		Name(pod.Name).
-		SubResource("portforward")
-	transport, upgrader, err := spdy.RoundTripperFor(o.RESTConfig)
-	if err != nil {
-		return err
+	select {
+	case <-graceCh:
+		return interruptcontext.Interrupted
+	default:
 	}
-	dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
+
 	pfwdReadyCh := make(chan struct{}) // closed when portforwarding ready?
 	pfwdStopCh := make(chan struct{}, 1)
-	// Alternatively use these streams for pforward
-	// var berr, bout bytes.Buffer
-	// buffErr := bufio.NewWriter(&berr)
-	// buffOut := bufio.NewWriter(&bout)
-	fw, err := portforward.NewOnAddresses(
-		dialer,
-		[]string{"localhost"},
-		[]string{fmt.Sprintf("%d:%d", o.LocalSSHPort, o.RemoteSSHPort)},
-		pfwdStopCh,
-		pfwdReadyCh,
-		o.Out,
-		o.ErrOut,
-	)
-	if err != nil {
-		return err
-	}
 	pfwdDoneCh := make(chan struct{}) // close when portforwarding exits.
-	go func() {
-		err := fw.ForwardPorts() // blocks
+	go func() error {
+		// Do a portforwarding to the opened SSH port.
+		req := o.ClientSet.CoreV1().RESTClient().Post().
+			Resource("pods").
+			Namespace(pod.Namespace).
+			Name(pod.Name).
+			SubResource("portforward")
+		transport, upgrader, err := spdy.RoundTripperFor(o.RESTConfig)
 		if err != nil {
-			fmt.Printf("error Forwarding SSH port: %v\n", err)
+			return err
+		}
+		dialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, "POST", req.URL())
+		fw, err := portforward.NewOnAddresses(
+			dialer,
+			[]string{"localhost"},
+			[]string{fmt.Sprintf("%d:%d", o.LocalSSHPort, o.RemoteSSHPort)},
+			pfwdStopCh,
+			pfwdReadyCh,
+			o.Out,    // TODO: var bout bytes.Buffer; buffOut := bufio.NewWriter(&berr)
+			o.ErrOut, // TODO: var berr bytes.BUffer; buffErr := bufio.NewWriter(&berr)
+		)
+		if err != nil {
+			return err
+		}
+		err = fw.ForwardPorts() // blocks
+		if err != nil {
+			return fmt.Errorf("error Forwarding SSH port: %v\n", err)
 		}
 		// If this errors, also everything following will error.
 		close(pfwdDoneCh)
+		return nil
 	}()
+	defer interruptcontext.DoGraceful(ctx, func() {
+		// TODO: if portforward somewhat hangs this will block cleaning up
+		// k8s pod and service.
+		close(pfwdStopCh)
+		<-pfwdDoneCh
+		log.Println("port forwarding closed")
+	})
 
-	// TODO: select on readyCh and time.After? Or is it possible to put a
-	// timeout in the http.Client.Transport for Dial?
-	<-pfwdReadyCh // also gets closed when ForwardPorts errors
-	log.Printf("port forwarding to url: %s\n", req.URL().String())
-	log.Printf("port forwarding  is ready: forwarding :%d --> pod %d\n", o.LocalSSHPort, o.RemoteSSHPort)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-graceCh:
+		return interruptcontext.Interrupted
+	case <-pfwdReadyCh:
+		log.Printf("port forwarding  is ready: forwarding :%d --> pod %d\n", o.LocalSSHPort, o.RemoteSSHPort)
+	}
 
-	// log.Println("check now")
-	// select {
-	// case <-ctx.Done():
-	// 	close(pfwdStopCh)
-	// 	<-pfwdDoneCh
-	// 	return ctx.Err()
-	// case <-time.After(120 * time.Second):
-	// }
-	<-time.After(10 * time.Second)
+	// TODO: need to do retries here. It seems the pod does not accept
+	// SSH connections also its ready.
+	<-time.After(5 * time.Second)
 
 	// The pod is now ready. Execute the command.
 	// Establish ssh connection over the forwarded port.
@@ -306,83 +337,92 @@ func (o *ClientOptions) Run(ctx context.Context) error {
 	sshAddr := fmt.Sprintf("localhost:%d", o.LocalSSHPort)
 	sshClient, err := ssh.Dial("tcp", sshAddr, sshConfig)
 	if err != nil {
-		close(pfwdStopCh)
-		<-pfwdDoneCh
 		log.Printf("error ssh.Dial:%v\n", err)
 		return err
 	}
+	defer interruptcontext.DoGraceful(ctx, func() {
+		log.Printf("ssl connection closed 127.0.0.1:%d\n", o.LocalSSHPort)
+		sshClient.Close()
+	})
 	log.Printf("ssl connection ready 127.0.0.1:%d\n", o.LocalSSHPort)
 
-	var tunnels []*sshtunnel.Tunnel
+	select {
+	case <-graceCh:
+		return interruptcontext.Interrupted
+	default:
+	}
+
+	// Setup tunnels.
+	var tunnels []*tunnel.Tunnel
 	for _, m := range o.PortMappings {
-		// TODO support remote ips
-		// Note that it does not work without the 0.0.0.0 here.
+		// TODO: we could check for interrupt and ctx.Done in every iteration
+		// TODO support remote ips: Note that it does not work without the 0.0.0.0 here.
 		remote := fmt.Sprintf("0.0.0.0:%d", m.ContainerPortNumber)
 		forward := m.TargetAddress()
-		t, err := sshtunnel.Setup(sshClient, remote, forward)
+		// Create listener for the tunnel. The listener gets closed
+		// when the tunnel gets closed.
+		lis, err := sshClient.Listen("tcp", remote)
 		if err != nil {
-			// Close all created tunnels.
-			for _, t := range tunnels {
-				t.Stop()
-			}
-			for _, t := range tunnels {
-				select {
-				case <-ctx.Done():
-					// Command killed. Leave tunnels left
-					// unclosed. Also portforwarding.
-					return ctx.Err()
-				case <-t.Done():
+			if !o.ContinueOnTunnelError {
+				// Close all created tunnels.
+				for _, t := range tunnels {
+					select {
+					case <-ctx.Done():
+						// Command killed. Leave tunnels left
+						// unclosed.
+						return ctx.Err()
+					default:
+						t.Close()
+						<-t.Done()
+					}
 				}
+				return fmt.Errorf("failed to setup listener from %s to %s: %v", remote, forward, err)
 			}
-			// Close portforward.
-			close(pfwdStopCh)
-			<-pfwdDoneCh
-			return fmt.Errorf("failed to setup tunnel from %s to %s: %v", remote, forward, err)
+			log.Printf("failed to setup listener from %s to %s: %v", remote, forward, err)
 		}
+		t := tunnel.New(lis, forward)
 		tunnels = append(tunnels, t)
 		log.Printf("tunnel from remove %s to target %s setup\n", remote, forward)
 	}
 
-	var wg sync.WaitGroup // wait group for all running tunnels
-	for _, t := range tunnels {
-		t_ := t
-		wg.Add(1)
-		go func() {
-			// TOOD: this can actually return an error
-			// use error group and make an option ContinueOnTunnelError
-			// to specify wheter to continue (if more than one tunnel)
-			// is left open or not.
-			t_.Run()
-			wg.Done()
-		}()
+	// Open tunnels.
+	tErrg, tctx := errgroup.WithContext(ctx)
+	for _, tt := range tunnels {
+		t := tt
+		tErrg.Go(t.Open)
 	}
 	go func() {
-		// TODO: use graceful here
-		<-ctx.Done()
-		for _, t := range tunnels {
-			t.Stop()
+		select {
+		case <-tctx.Done():
+			// If tctx is done and tctx.Err is non-nil an error
+			// occured. Close the other tunnels if requested.
+			// Note that if ctx is done and and tctx.Err is nil,
+			// the Errgroup and thus the tunnels already exited.
+			if tctx.Err() != nil && !o.ContinueOnTunnelError {
+				for _, t := range tunnels {
+					t.Close()
+				}
+			}
+		case <-graceCh:
+			for _, t := range tunnels {
+				t.Close()
+			}
 		}
 	}()
+	_ = tErrg.Wait()
 
-	// TODO: select on Wait and ctx.Done()
-	// - if wait successful, then graceful shutdown happended
-	// - if ctx.Done hard kill is requested
-	wg.Wait()
-
-	close(pfwdStopCh)
-	// Wait for the port forward to end.
-	// TODO do not wait in case of ctx.Done
-	<-pfwdDoneCh
-
+	// Note that, in case of a graceful shutdown the defer functions will
+	// close the SSH connection, close the portforwarding and cleanup the
+	// pod and services.
 	return nil
 }
 
-func getConfigMap(name string, dewID string, remotePort int) *corev1.ConfigMap {
+func getConfigMap(name string, remotePort int) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				"io.github.dew": dewID,
+				"io.github.dew": name,
 			},
 		},
 		Data: map[string]string{
@@ -398,12 +438,12 @@ sed -i 's/X11Forwarding no/X11Forwarding yes/g' /etc/ssh/sshd_config
 	}
 }
 
-func getPod(name, dewID string, ports []corev1.ContainerPort) *corev1.Pod {
+func getPod(name string, ports []corev1.ContainerPort) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				"io.github.dew": dewID,
+				"io.github.dew": name,
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -436,17 +476,17 @@ func getPod(name, dewID string, ports []corev1.ContainerPort) *corev1.Pod {
 	}
 }
 
-func getService(name, dewID string, ports []corev1.ServicePort) *corev1.Service {
+func getService(name string, ports []corev1.ServicePort) *corev1.Service {
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 			Labels: map[string]string{
-				"io.github.dew": dewID,
+				"io.github.dew": name,
 			},
 		},
 		Spec: corev1.ServiceSpec{
 			Selector: map[string]string{
-				"io.github.dew": dewID,
+				"io.github.dew": name,
 			},
 			Ports: ports,
 		},

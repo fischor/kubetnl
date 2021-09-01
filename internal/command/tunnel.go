@@ -120,13 +120,16 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 }
 
 func (o *TunnelOptions) Complete(f cmdutil.Factory, args []string) error {
-	if len(args) != 1 {
-		return fmt.Errorf("requires exactly one agument, got %d", len(args))
+	if len(args) == 0 {
+		return fmt.Errorf("tunnel name must be specified")
+	}
+	if len(args) > 1 {
+		return fmt.Errorf("exactly one tunnel name must be specified, got %d", len(args))
 	}
 	o.Name = args[0]
 
 	if len(o.RawPortMappings) == 0 {
-		return fmt.Errorf("specify one or more ports to tunnel. Use --tcp 8080:8080 or --udp 8080:9090 for example.")
+		return fmt.Errorf("at least one PORT is required for tunnel")
 	}
 	var err error
 	o.PortMappings, err = port.ParseMappings(o.RawPortMappings)
@@ -324,44 +327,36 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	}
 
 	// Setup tunnels.
-	var tunnels []*tunnel.Tunnel
+	var pairs []tunnelWithListener
 	for _, m := range o.PortMappings {
 		// TODO: Check for interrupt and ctx.Done in every iteration.
 		// TODO Support remote ips: Note that it does not work without the 0.0.0.0 here.
+		target := m.TargetAddress()
 		remote := fmt.Sprintf("0.0.0.0:%d", m.ContainerPortNumber)
-		forward := m.TargetAddress()
-		// Create listener for the tunnel. The listener gets closed
-		// when the tunnel gets closed.
-		lis, err := sshClient.Listen("tcp", remote)
+		l, err := sshClient.Listen("tcp", remote)
 		if err != nil {
 			if !o.ContinueOnTunnelError {
-				// Close all created tunnels.
-				for _, t := range tunnels {
-					select {
-					case <-ctx.Done():
-						// Command killed. Leave tunnels left
-						// unclosed.
-						return ctx.Err()
-					default:
-						t.Close()
-						<-t.Done()
-					}
+				// Close all created listeners.
+				for _, p := range pairs {
+					p.l.Close()
 				}
-				fmt.Fprintf(o.Out, "Failed to tunnel from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, forward)
-				return fmt.Errorf("failed to setup listener from %s to %s: %v", remote, forward, err)
+				fmt.Fprintf(o.Out, "Failed to tunnel from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, target)
+				return fmt.Errorf("failed to listen on remote %s: %v", remote, err)
 			}
-			klog.Errorf("failed to setup listener from %s to %s: %v", remote, forward, err)
+			klog.Errorf("failed to listen on remote %s: %v. No tunnel created.", remote, err)
 		}
-		t := tunnel.New(lis, forward)
-		tunnels = append(tunnels, t)
-		fmt.Fprintf(o.Out, "Tunneling from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, forward)
+		pairs = append(pairs, tunnelWithListener{
+			t: &tunnel.Tunnel{TargetAddr: target},
+			l: l,
+		})
+		fmt.Fprintf(o.Out, "Tunneling from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, target)
 	}
 
 	// Open tunnels.
 	tErrg, tctx := errgroup.WithContext(ctx)
-	for _, tt := range tunnels {
-		t := tt
-		tErrg.Go(t.Open)
+	for _, pp := range pairs {
+		p := pp
+		tErrg.Go(func() error { return p.t.Open(p.l) })
 	}
 	go func() {
 		select {
@@ -371,13 +366,13 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 			// Note that if ctx is done and and tctx.Err is nil,
 			// the Errgroup and thus the tunnels already exited.
 			if tctx.Err() != nil && !o.ContinueOnTunnelError {
-				for _, t := range tunnels {
-					t.Close()
+				for _, p := range pairs {
+					p.t.Close()
 				}
 			}
 		case <-graceCh:
-			for _, t := range tunnels {
-				t.Close()
+			for _, p := range pairs {
+				p.t.Close()
 			}
 		}
 	}()
@@ -387,6 +382,11 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	// close the SSH connection, close the portforwarding and cleanup the
 	// pod and services.
 	return nil
+}
+
+type tunnelWithListener struct {
+	t *tunnel.Tunnel
+	l net.Listener
 }
 
 func getPod(name string, sshPort int, ports []corev1.ContainerPort) *corev1.Pod {

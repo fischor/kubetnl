@@ -1,3 +1,4 @@
+// Package tunnel provides a TCP tunnel implementation.
 package tunnel
 
 import (
@@ -7,37 +8,37 @@ import (
 	"sync"
 )
 
-// To create a new Tunnel call Setup.
+// Tunnel forwards connections from a source listener to a target adress.
+//
+// The zero value for Tunnel is a valid configuration that forwards incoming
+// connection to :http (localhost port 80).
 type Tunnel struct {
-	lis net.Listener
+	// The target address to forward traffic to.  TargetAddr specifies the
+	// TCP address to forward traffic to, in the form "host:port". If
+	// empty, ":http" (port 80) is used.  See net.Dial for details of the
+	// address format.
+	TargetAddr string
 
-	// The address to forward the traffic from the remote to.
-	// Format: <ip>:<port> or :<port>
-	forward string
+	// ErrorLog specifies an optional logger for errors accepting
+	// connections and unexpected behavior from forwarding connections.
+	// If nil, logging is done via the log package's standard logger.
+	ErrorLog *log.Logger
 
-	doneCh chan struct{}
+	lis *onceCloseListener
 }
 
-// Creates a new tunnel.
+// Open accepts incoming connections on l, creating a new service goroutine for
+// each. The service goroutines open a new connection to t.TargetAddr and
+// forward the data read from the incoming connection.
 //
-// You can close lis once the tunnel is done.
-func New(lis net.Listener, target string) *Tunnel {
-	return &Tunnel{
-		lis:     lis,
-		forward: target,
-		doneCh:  make(chan struct{}),
-	}
-}
-
-// TODO better logging (logrus)
-
-// Open the tunnel.
-//
-// Note that in case the address passed to forward is invalid, no error will be
-// returned. Each new incoming request will again try to establish a connection
-// to the forward address.
-func (t *Tunnel) Open() error {
-	defer close(t.doneCh)
+// Open always closes l before returning. Any non-retryable error that occurs
+// while accepting connections will be returned. Errors occurring while
+// forwarding an accepted wont cause Open to return. They are logged using
+// t.ErrorLog. If a Close causes the tunnel to stop and Open to return, nil
+// will be returned.
+func (t *Tunnel) Open(l net.Listener) error {
+	t.lis = &onceCloseListener{Listener: l}
+	defer l.Close()
 
 	// Waits for all connections handlers to finish.
 	var handlers sync.WaitGroup
@@ -54,24 +55,23 @@ func (t *Tunnel) Open() error {
 			// retry-able will conform to the net.Error interface,
 			// and return Temporary true.
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
-				log.Printf("tunnel temporary error lis.Accept: %v\n", err)
+				t.logf("accepting conn temporary error: %v\n", err)
 				continue
 			}
 			if err != io.EOF {
-				log.Printf("tunnel fatal error lis.Accept: %v\n", err)
+				t.logf("accepting conn fatal error: %v\n", err)
 				t.lis.Close()
 			}
 			handlers.Wait()
 			return err
 		}
-		log.Println("tunnel lis accepted connection")
 
 		// Handle connection.
 		handlers.Add(1)
 		go func() {
-			e := t.handleConnection(conn) // ignoring returned error
-			if e != nil {
-				log.Printf("error handling connection: %v\n", e)
+			err := t.handleConnection(conn)
+			if err != nil {
+				t.logf("error forwarding connection: %v\n", err)
 			}
 			conn.Close()
 			handlers.Done()
@@ -81,9 +81,10 @@ func (t *Tunnel) Open() error {
 
 func (t *Tunnel) handleConnection(conn net.Conn) error {
 	// Open connection to tunnel target.
-	targetConn, err := net.Dial("tcp", t.forward)
+	targetConn, err := net.Dial("tcp", t.TargetAddr)
 	if err != nil {
-		log.Printf("tunnel net.Dial error: %v\n", err)
+		// TODO(fischor): Close the tunnel in case this is a
+		// non-retryable error?
 		return err
 	}
 
@@ -93,36 +94,57 @@ func (t *Tunnel) handleConnection(conn net.Conn) error {
 	go func() {
 		_, err := io.Copy(conn, targetConn)
 		if err != nil {
-			log.Printf("tunnel: conn -> targetConn error: %v", err)
+			t.logf("error forwarding from source to target: %v", err)
 		}
 		wg.Done()
 	}()
 	go func() {
 		_, err := io.Copy(targetConn, conn)
 		if err != nil {
-			log.Printf("tunnel: targetConn -> conn error: %v\n", err)
+			t.logf("error forwarding from source to remote: %v\n", err)
 		}
 		wg.Done()
 	}()
 
 	wg.Wait()
 
-	err = targetConn.Close()
-	if err != nil {
-		log.Printf("tunnel: failed to close target connection %v", err)
-	}
+	return targetConn.Close()
+}
 
-	log.Printf("tunnel: handeled connection from %s: successful", conn.RemoteAddr().String())
+func (t *Tunnel) logf(format string, args ...interface{}) {
+	if t.ErrorLog != nil {
+		t.ErrorLog.Printf(format, args...)
+	} else {
+		log.Printf(format, args...)
+	}
+}
+
+// Close closes the tunnel gracefully, stopping it from accepting new
+// connections without interrupting any active connections.
+//
+// Close will close the tunnels source listener and returns immediately. It
+// propagates any error from the listeners Close call.
+//
+// When Close is called, Open does not return immediately. It will finish
+// handling all active connections before returning.
+func (t *Tunnel) Close() error {
+	if t.lis != nil {
+		return t.lis.Close()
+	}
 	return nil
 }
 
-// Close closes the tunnel. This will close the underlying listener.
-func (t *Tunnel) Close() error {
-	// Unblock t.lis.Accept. Earlier accepted connection can still finish.
-	return t.lis.Close()
+// onceCloseListener wraps a net.Listener, protecting it from
+// multiple Close calls.
+type onceCloseListener struct {
+	net.Listener
+	once     sync.Once
+	closeErr error
 }
 
-// Done returns a channel thats closed when Open exits.
-func (t *Tunnel) Done() <-chan struct{} {
-	return t.doneCh
+func (oc *onceCloseListener) Close() error {
+	oc.once.Do(oc.close)
+	return oc.closeErr
 }
+
+func (oc *onceCloseListener) close() { oc.closeErr = oc.Listener.Close() }

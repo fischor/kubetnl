@@ -1,7 +1,7 @@
 on:
   push:
     tags:
-      - "*.*.*"
+      - "v*.*.*"
 
 name: Prepare Release
 
@@ -23,16 +23,17 @@ jobs:
       - name: Add current tag environment vars
         run: | 
           TAG=$(git describe HEAD --tags --abbrev=0)
-          echo $TAG >> $GITHUB_ENV
+          echo "TAG=$TAG" >> $GITHUB_ENV
           echo $TAG
 
-      # Builds bin/kubetnl-{TAG}_{OS}-{ARCH}/kubetnl executables.
+      # Builds bin/kubetnl-{TAG:1}_{OS}-{ARCH}/kubetnl executables.
+      # Note that the v is stripped from the TAG (v0.1.0 --> 0.1.0).
       - name: Run build
         run: make release
 
       - name: Check if version has been updated to reflect the current tag
         run: |
-          VERSION=$(./bin/kubentl-"$TAG"_linux-amd64/kubetnl version --short)
+          VERSION=$(./bin/kubetnl-"${TAG:1}"_linux-amd64/kubetnl version --short)
           echo $VERSION
           if [[ "$TAG" != "$VERSION" ]]; then exit 1; fi
 

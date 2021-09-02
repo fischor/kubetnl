@@ -8,20 +8,19 @@ import (
 	"sync"
 )
 
-// Forwarder forwards connections from a source listener to a target adress.
+// Forwarder forwards connections from a source listener to a target address.
 //
 // The zero value for Forwarder is a valid configuration that forwards incoming
-// connection to :http (localhost port 80).
+// connections to :http (localhost port 80).
 type Forwarder struct {
-	// The target address to forward traffic to.  TargetAddr specifies the
-	// TCP address to forward traffic to, in the form "host:port". If
-	// empty, ":http" (port 80) is used.  See net.Dial for details of the
-	// address format.
+	// TargetAddr specifies the TCP address to forward incoming connections
+	// to, in the form "host:port". If empty, ":http" (port 80) is used.
+	// See net.Dial for details of the address format.
 	TargetAddr string
 
 	// ErrorLog specifies an optional logger for errors accepting
-	// connections and unexpected behavior from forwarding connections.
-	// If nil, logging is done via the log package's standard logger.
+	// connections and errors while forwarding connections. If nil,
+	// logging is done via the log package's standard logger.
 	ErrorLog *log.Logger
 
 	lis *onceCloseListener
@@ -33,19 +32,23 @@ type Forwarder struct {
 //
 // Open always closes l before returning. Any non-retryable error that occurs
 // while accepting connections will be returned. Errors occurring while
-// forwarding an accepted wont cause Open to return. They are logged using
-// f.ErrorLog. If a Close causes the forwarder to stop and Open to return, nil
-// will be returned.
+// forwarding an accepted connections won't cause Open to return. They are
+// logged using f.ErrorLog. If a Close causes the forwarder to stop and Open to
+// return, nil will be returned.
 func (f *Forwarder) Open(l net.Listener) error {
 	f.lis = &onceCloseListener{Listener: l}
 	defer l.Close()
 
-	// Waits for all connections handlers to finish.
+	target := f.TargetAddr
+	if target == "" {
+		target = ":http"
+	}
+
+	// Waits for all connection handlers to finish.
 	var handlers sync.WaitGroup
 
 	// Loop until f.lis is closed.
 	for {
-		var conn net.Conn
 		// f.lis.Accept waits for new connections. Unblocks with an
 		// io.EOF error if f.lis.Close is called. Earlier accepted
 		// connections can still finish.
@@ -69,7 +72,7 @@ func (f *Forwarder) Open(l net.Listener) error {
 		// Handle connection.
 		handlers.Add(1)
 		go func() {
-			err := f.handleConnection(conn)
+			err := f.handleConnection(conn, target)
 			if err != nil {
 				f.logf("error forwarding connection: %v\n", err)
 			}
@@ -79,9 +82,9 @@ func (f *Forwarder) Open(l net.Listener) error {
 	}
 }
 
-func (f *Forwarder) handleConnection(conn net.Conn) error {
+func (f *Forwarder) handleConnection(conn net.Conn, target string) error {
 	// Open connection to forwarder target.
-	targetConn, err := net.Dial("tcp", f.TargetAddr)
+	targetConn, err := net.Dial("tcp", target)
 	if err != nil {
 		// TODO(fischor): Close the forwarder in case this is a
 		// non-retryable error?
@@ -101,7 +104,7 @@ func (f *Forwarder) handleConnection(conn net.Conn) error {
 	go func() {
 		_, err := io.Copy(targetConn, conn)
 		if err != nil {
-			f.logf("error forwarding from source to remote: %v\n", err)
+			f.logf("error forwarding from source to target: %v\n", err)
 		}
 		wg.Done()
 	}()
@@ -122,7 +125,7 @@ func (f *Forwarder) logf(format string, args ...interface{}) {
 // Close closes the forwarder gracefully, stopping it from accepting new
 // connections without interrupting any active connections.
 //
-// Close will close the forwarders source listener and returns immediately. It
+// Close will close the forwarders source listener and return immediately. It
 // propagates any error from the listeners Close call.
 //
 // When Close is called, Open does not return immediately. It will finish

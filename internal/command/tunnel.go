@@ -63,7 +63,7 @@ type TunnelOptions struct {
 
 var (
 	tunnelLong = templates.LongDesc(`
-		Forward TCP traffic from within a cluster to another host.
+		Tunnel TCP connections for a service within a cluster to another (external) endpoint.
 
 		A service and pod gets created in the cluster named like the soley positional 
 		argument passed to the tunnel command. The pod runs a SSH server. A portforward
@@ -75,17 +75,17 @@ var (
 		and cleanup the created resources in the cluster.`)
 
 	tunnelExample = templates.LongDesc(`
-		# Tunnel to the local port 8080 from container port 80.
-		kubetnl tunnel -p 8080:80 mytunnel
+		# Tunnel to local port 8080 from myservice.<namespace>.svc.cluster.local:80.
+		kubetnl tunnel myservice 8080:80
 
-		# Tunnel to port 10.10.10.10:3333 from container port 80.
-		kubetnl tunnel -p 10.10.10.10:3333:80 mytunnel
+		# Tunnel to port 10.10.10.10:3333 from myservice.<namespace>.svc.cluster.local:80.
+		kubetnl tunnel myservice 10.10.10.10:3333:80
 
-		# Tunnel to local port 8080 from container port 80 and to local port 9090 from container port 90.
-		kubetnl tunnel -p 8080:80 -p 9090:90 mytunnel
+		# Tunnel to local port 8080 from myservice.<namespace>.svc.cluster.local:80 and to local port 9090 from myservice.<namespace>.svc.cluster.local:90.
+		kubetnl tunnel myservice 8080:80 9090:90
 
-		# Tunnel to local port 8080 from container port 80 using a different version for the server image.
-		kubetnl tunnel -p 80:80 --image docker.io/fischor/kubetnl-server:0.1.0 mytunnel`)
+		# Tunnel to local port 80 from myservice.<namespace>.svc.cluster.local:80 using a different version 0.1.0 of the server image.
+		kubetnl tunnel --image docker.io/fischor/kubetnl-server:0.1.0 mytunnel myservice 80:80`)
 )
 
 var (
@@ -98,43 +98,34 @@ var (
 func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	o := &TunnelOptions{
 		IOStreams:    streams,
-		Namespace:    corev1.NamespaceDefault,
 		LocalSSHPort: 7154, // TODO: grab one randomly
 		Image:        "docker.io/fischor/kubetnl-server:0.1.0",
 	}
 
 	cmd := &cobra.Command{
-		Use:     "tunnel",
-		Short:   "Tunnel TCP traffic from within a cluster to another host",
+		Use:     "tunnel SERVICE_NAME [options] TARGET_ADDR:SERVICE_PORT [...[TARGET_ADDR:SERVICE_PORT]]",
+		Short:   "Tunnel TCP connections for a service within a cluster to another (external) endpoint",
 		Long:    tunnelLong,
 		Example: tunnelExample,
 		Run: func(cmd *cobra.Command, args []string) {
-			cmdutil.CheckErr(o.Complete(f, args))
+			cmdutil.CheckErr(o.Complete(f, cmd, args))
 			ctx, graceCh := interruptcontext.WithGrafulInterrupt(cmd.Context())
 			cmdutil.CheckErr(o.Run(ctx, graceCh))
 		},
 	}
 
-	cmd.Flags().StringSliceVarP(&o.RawPortMappings, "publish", "p", nil, "The TCP ports to tunnel. Format <target>:<container>")
 	cmd.Flags().StringVar(&o.Image, "image", o.Image, "The container image thats get deployed to serve a SSH server")
 
 	return cmd
 }
 
-func (o *TunnelOptions) Complete(f cmdutil.Factory, args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("tunnel name must be specified")
-	}
-	if len(args) > 1 {
-		return fmt.Errorf("exactly one tunnel name must be specified, got %d", len(args))
+func (o *TunnelOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []string) error {
+	if len(args) < 2 {
+		return cmdutil.UsageErrorf(cmd, "SERVICE_NAME and list of TARGET_ADDR:SERVICE_PORT pairs are required for tunnel")
 	}
 	o.Name = args[0]
-
-	if len(o.RawPortMappings) == 0 {
-		return fmt.Errorf("at least one PORT is required for tunnel")
-	}
 	var err error
-	o.PortMappings, err = port.ParseMappings(o.RawPortMappings)
+	o.PortMappings, err = port.ParseMappings(args[1:])
 	if err != nil {
 		return err
 	}
@@ -142,7 +133,6 @@ func (o *TunnelOptions) Complete(f cmdutil.Factory, args []string) error {
 	if err != nil {
 		return err
 	}
-
 	o.Namespace, o.EnforceNamespace, err = f.ToRawKubeConfigLoader().Namespace()
 	if err != nil {
 		return err

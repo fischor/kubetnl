@@ -74,7 +74,7 @@ var (
 		To stop the tunnel use CTRL+C once. This will gracefully close all connections
 		and cleanup the created resources in the cluster.`)
 
-	tunnelExample = templates.LongDesc(`
+	tunnelExample = templates.Examples(`
 		# Tunnel to local port 8080 from myservice.<namespace>.svc.cluster.local:80.
 		kubetnl tunnel myservice 8080:80
 

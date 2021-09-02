@@ -45,7 +45,7 @@ var (
 		Use cleanup in case there are resources left for previous runs.
 		Note that if there are active tunnels, this will destroy these.`)
 
-	cleanupExamples = templates.LongDesc(`
+	cleanupExamples = templates.Examples(`
 		# Cleanup all resources in the current namespace.
 		kubetnl cleanup
 

@@ -12,7 +12,7 @@ import (
 
 	"github.com/fischor/kubetnl/internal/interruptcontext"
 	"github.com/fischor/kubetnl/internal/port"
-	"github.com/fischor/kubetnl/internal/tunnel"
+	"github.com/fischor/kubetnl/internal/portforward"
 	"github.com/spf13/cobra"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/sync/errgroup"
@@ -25,7 +25,7 @@ import (
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/portforward"
+	k8sportforward "k8s.io/client-go/tools/portforward"
 	watchtools "k8s.io/client-go/tools/watch"
 	"k8s.io/client-go/transport/spdy"
 	"k8s.io/klog/v2"
@@ -268,7 +268,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		var bout, berr bytes.Buffer
 		pfwdOut := bufio.NewWriter(&bout)
 		pfwdErr := bufio.NewWriter(&berr)
-		pfwd, err := portforward.New(dialer, pfwdPorts, pfwdStopCh, pfwdReadyCh, pfwdOut, pfwdErr)
+		pfwd, err := k8sportforward.New(dialer, pfwdPorts, pfwdStopCh, pfwdReadyCh, pfwdOut, pfwdErr)
 		if err != nil {
 			return err
 		}
@@ -329,7 +329,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	}
 
 	// Setup tunnels.
-	var pairs []tunnelWithListener
+	var pairs []forwarderWithListener
 	for _, m := range o.PortMappings {
 		// TODO: Check for interrupt and ctx.Done in every iteration.
 		// TODO Support remote ips: Note that it does not work without the 0.0.0.0 here.
@@ -347,8 +347,8 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 			}
 			klog.Errorf("failed to listen on remote %s: %v. No tunnel created.", remote, err)
 		}
-		pairs = append(pairs, tunnelWithListener{
-			t: &tunnel.Tunnel{TargetAddr: target},
+		pairs = append(pairs, forwarderWithListener{
+			f: &portforward.Forwarder{TargetAddr: target},
 			l: l,
 		})
 		fmt.Fprintf(o.Out, "Tunneling from %s.%s.svc.cluster.local:%d --> %s\n", o.Name, o.Namespace, m.ContainerPortNumber, target)
@@ -358,7 +358,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	tErrg, tctx := errgroup.WithContext(ctx)
 	for _, pp := range pairs {
 		p := pp
-		tErrg.Go(func() error { return p.t.Open(p.l) })
+		tErrg.Go(func() error { return p.f.Open(p.l) })
 	}
 	go func() {
 		select {
@@ -369,12 +369,12 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 			// the Errgroup and thus the tunnels already exited.
 			if tctx.Err() != nil && !o.ContinueOnTunnelError {
 				for _, p := range pairs {
-					p.t.Close()
+					p.f.Close()
 				}
 			}
 		case <-graceCh:
 			for _, p := range pairs {
-				p.t.Close()
+				p.f.Close()
 			}
 		}
 	}()
@@ -386,8 +386,8 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	return nil
 }
 
-type tunnelWithListener struct {
-	t *tunnel.Tunnel
+type forwarderWithListener struct {
+	f *portforward.Forwarder
 	l net.Listener
 }
 

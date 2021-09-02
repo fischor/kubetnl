@@ -62,39 +62,41 @@ type TunnelOptions struct {
 }
 
 var (
+	tunnelShort = "Setup a new tunnel"
+
 	tunnelLong = templates.LongDesc(`
-		Tunnel TCP connections for a service within a cluster to another (external) endpoint.
+		Setup a new tunnel.
 
-		A service and pod gets created in the cluster named like the soley positional 
-		argument passed to the tunnel command. The pod runs a SSH server. A portforward
-		connection to the pod is establish. Using the forwarded port, a SSH connection
-		to the pod gets established. That SSH connection is used to tunnel any traffic
-		the pod received on the ports passed with the --publish/-p flag.
+		A tunnel forwards connections directed to a Kubernetes Service port within a
+		cluster to an arbitrary endpoint outside of the cluster, e.g. to your local
+		machine.
 
-		To stop the tunnel use CTRL+C once. This will gracefully close all connections
-		and cleanup the created resources in the cluster.`)
+		Under the hood "kubetnl tunnel" creates a new service and pod that expose the 
+		specified ports. Any incoming connections to an exposed port of the newly created 
+		service/pod will be tunneled to the endpoint specified for that port.
+
+		"kubetnl tunnel" runs in the foreground. To stop press CTRL+C once. This will 
+		gracefully shutdown all active connections and cleanup the created resources 
+		in the cluster before exiting.`)
 
 	tunnelExample = templates.Examples(`
 		# Tunnel to local port 8080 from myservice.<namespace>.svc.cluster.local:80.
 		kubetnl tunnel myservice 8080:80
 
-		# Tunnel to port 10.10.10.10:3333 from myservice.<namespace>.svc.cluster.local:80.
+		# Tunnel to 10.10.10.10:3333 from myservice.<namespace>.svc.cluster.local:80.
 		kubetnl tunnel myservice 10.10.10.10:3333:80
 
 		# Tunnel to local port 8080 from myservice.<namespace>.svc.cluster.local:80 and to local port 9090 from myservice.<namespace>.svc.cluster.local:90.
 		kubetnl tunnel myservice 8080:80 9090:90
 
-		# Tunnel to local port 80 from myservice.<namespace>.svc.cluster.local:80 using a different version 0.1.0 of the server image.
-		kubetnl tunnel --image docker.io/fischor/kubetnl-server:0.1.0 mytunnel myservice 80:80`)
+		# Tunnel to local port 80 from myservice.<namespace>.svc.cluster.local:80 using version 0.1.0 of the kubetnl server image.
+		kubetnl tunnel --image docker.io/fischor/kubetnl-server:0.1.0 myservice 80:80`)
 )
 
 var (
 	kubetnlPodContainerName = "main"
 )
 
-// NewTunnelCommand creates a ne tunnel command.
-//
-// The tunnel command works with a graceful shutdown.
 func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	o := &TunnelOptions{
 		IOStreams:    streams,
@@ -103,8 +105,8 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 	}
 
 	cmd := &cobra.Command{
-		Use:     "tunnel SERVICE_NAME [options] TARGET_ADDR:SERVICE_PORT [...[TARGET_ADDR:SERVICE_PORT]]",
-		Short:   "Tunnel TCP connections for a service within a cluster to another (external) endpoint",
+		Use:     "tunnel SERVICE_NAME TARGET_ADDR:SERVICE_PORT [...[TARGET_ADDR:SERVICE_PORT]]",
+		Short:   tunnelShort,
 		Long:    tunnelLong,
 		Example: tunnelExample,
 		Run: func(cmd *cobra.Command, args []string) {

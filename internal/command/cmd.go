@@ -15,20 +15,25 @@ import (
 )
 
 var (
-	kubetnlLong = templates.LongDesc("")
+	kubetnlShort = "Tunnel connections from within a k8s cluster to an external endpoint."
+
+	kubetnlLong = templates.LongDesc(`
+                kubetnl tunnels TCP connections from within a Kubernetes cluster to an arbitrary external endpoint.
+
+                Find more information and check out the souce code at: https://github.com/fischor/kubetnl`)
 )
 
 func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kubetnl",
-		Short: "Tunnel traffic received on pod to your local machine",
+		Short: "",
 		Long:  kubetnlLong,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmd.Help()
 		},
 	}
 
-	// Adds the following flags:
+	// Adds the following global flags:
 	//
 	// 	"kubeconfig" "cluster" "user" "context" "namespace" "server"
 	// 	"tls-server-name" "insecure-skip-tls-verify"
@@ -39,8 +44,6 @@ func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	// These flags are used by the cmdutil.Factory.
 	kubeConfigFlags := genericclioptions.NewConfigFlags(true)
 	kubeConfigFlags.AddFlags(cmd.PersistentFlags())
-
-	// Why?
 	cmd.PersistentFlags().AddGoFlagSet(flag.CommandLine)
 
 	f := cmdutil.NewFactory(kubeConfigFlags)
@@ -61,7 +64,7 @@ func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	}
 	groups.Add(cmd)
 
-	templates.ActsAsRootCommand(cmd, []string{}, groups...)
+	templates.ActsAsRootCommand(cmd, []string{"options"}, groups...)
 
 	// Add subcommands not within any group.
 	cmd.AddCommand(version.NewVersionCommand(streams))

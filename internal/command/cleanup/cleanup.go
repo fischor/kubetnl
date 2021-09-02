@@ -39,20 +39,28 @@ type CleanupOptions struct {
 }
 
 var (
-	cleanupLong = templates.LongDesc(`
-		Cleanup all errneously leftover resources created by kubetnl.
+	cleanupShort = "Delete all resources created by kubetnl"
 
-		Use cleanup in case there are resources left for previous runs.
-		Note that if there are active tunnels, this will destroy these.`)
+	cleanupLong = templates.LongDesc(`
+		Delete all resources created by kubetnl.
+
+		Use "kubetnl cleanup" in case there are any resources left for previously 
+		created tunnels. Pods and services might, in rare cases, fail to be
+		cleaned up correctly e.g. because of a broken internet connection.
+
+		This command will delete all pods and services that have a label with the key 
+		"io.github.kubetnl" in the selected namespace.
+
+		Note that this will also destroy any actively running tunnels.`)
 
 	cleanupExamples = templates.Examples(`
-		# Cleanup all resources in the current namespace.
+		# Cleanup all kubetnl resources in the current namespace.
 		kubetnl cleanup
 
-		# Cleanup all resources in the "hello" namespace.
+		# Cleanup all kubetnl resources in the "hello" namespace.
 		kubetnl cleanup -n hello
 
-		# Cleanup all resources in all namespaces.
+		# Cleanup all kubetnl resources in all namespaces.
 		kubetnl cleanup --all-namespaces`)
 )
 
@@ -64,7 +72,7 @@ func NewCleanupCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *
 
 	cmd := &cobra.Command{
 		Use:     "cleanup [options]",
-		Short:   "Cleanup all errneously leftover resources created by kubetnl",
+		Short:   cleanupShort,
 		Long:    cleanupLong,
 		Example: cleanupExamples,
 		Run: func(cmd *cobra.Command, args []string) {

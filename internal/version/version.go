@@ -5,7 +5,7 @@ import "strings"
 
 var (
 	// Release version of kubetnl.
-	version = "development"
+	version = "0.1.0-alpha.6"
 
 	// NOTE: The $Format strings are replaced during 'git archive' thanks
 	// to the companion .gitattributes file containing 'export-subst' in

@@ -1,0 +1,49 @@
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+name: Prepare Release
+
+jobs:
+  autorelease:
+    name: Prepare Release
+    runs-on: "ubuntu-latest"
+    steps:
+      - uses: actions/checkout@v2.3.4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v2
+        with:
+          go-version: '1.16'
+
+      - run: go version
+
+      - name: Add current tag environment vars
+        run: echo "TAG=$(git describe HEAD --tags --abbrev=0)" >> $GITHUB_ENV
+
+      # Builds bin/kubetnl-{TAG}_{OS}-{ARCH}/kubetnl executables.
+      - name: Run build
+        run: make release
+
+      - name: Check if version has been updated to reflect the current tag
+        run: |
+          echo $TAG
+          VERSION=$(./bin/kubentl-"$TAG"_linux-amd64/kubetnl version --short)
+          echo $VERSION
+          if [[ "$TAG" != "$VERSION" ]]; then exit 1; fi
+
+      - name: Release Notes
+        run: git log $(git describe HEAD~ --tags --abbrev=0)..HEAD --pretty='format:* %h %s%n  * %an <%ae>' --no-merges >> ".github/RELEASE-TEMPLATE.md"
+      - name: Create Release Draft
+        uses: softprops/action-gh-release@v1
+        with:
+          body_path: ".github/RELEASE-TEMPLATE.md"
+          draft: true
+          files: |
+            bin/kubetnl-${{env.TAG}}_darwin-amd64/kubetnl
+            bin/kubetnl-${{env.TAG}}_linux-amd64/kubetnl
+            bin/kubetnl-${{env.TAG}}_windows-amd64/kubetnl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -38,6 +38,7 @@ type TunnelOptions struct {
 
 	Namespace        string
 	EnforceNamespace bool
+	Image            string
 
 	// Name of the tunnel. This will also be the name of the pod and service.
 	Name string
@@ -81,11 +82,13 @@ var (
 		kubetnl tunnel -p 10.10.10.10:3333:80 mytunnel
 
 		# Tunnel to local port 8080 from container port 80 and to local port 9090 from container port 90.
-		kubetnl tunnel -p 8080:80 -p 9090:90 mytunnel`)
+		kubetnl tunnel -p 8080:80 -p 9090:90 mytunnel
+
+		# Tunnel to local port 8080 from container port 80 using a different version for the server image.
+		kubetnl tunnel -p 80:80 --image docker.io/fischor/kubetnl-server:0.1.0 mytunnel`)
 )
 
 var (
-	kubetnlImage            = "cr.mycom.com:5000/kubetnl-server"
 	kubetnlPodContainerName = "main"
 )
 
@@ -97,6 +100,7 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 		IOStreams:    streams,
 		Namespace:    corev1.NamespaceDefault,
 		LocalSSHPort: 7154, // TODO: grab one randomly
+		Image:        "docker.io/fischor/kubetnl-server:0.1.0",
 	}
 
 	cmd := &cobra.Command{
@@ -112,6 +116,7 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 	}
 
 	cmd.Flags().StringSliceVarP(&o.RawPortMappings, "publish", "p", nil, "The TCP ports to tunnel. Format <target>:<container>")
+	cmd.Flags().StringVar(&o.Image, "image", o.Image, "The container image thats get deployed to serve a SSH server")
 
 	return cmd
 }
@@ -191,7 +196,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		ContainerPort: int32(o.RemoteSSHPort),
 	})
 	podClient := o.ClientSet.CoreV1().Pods(o.Namespace)
-	pod := getPod(o.Name, o.RemoteSSHPort, ports)
+	pod := getPod(o.Name, o.Image, o.RemoteSSHPort, ports)
 	klog.V(2).Infof("Creating pod \"%s\"...", o.Name)
 	pod, err = podClient.Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
@@ -386,7 +391,7 @@ type tunnelWithListener struct {
 	l net.Listener
 }
 
-func getPod(name string, sshPort int, ports []corev1.ContainerPort) *corev1.Pod {
+func getPod(name, image string, sshPort int, ports []corev1.ContainerPort) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -397,7 +402,7 @@ func getPod(name string, sshPort int, ports []corev1.ContainerPort) *corev1.Pod 
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{
 				Name:  kubetnlPodContainerName,
-				Image: kubetnlImage,
+				Image: image,
 				Ports: ports,
 				Env: []corev1.EnvVar{
 					{Name: "PORT", Value: strconv.Itoa(sshPort)},

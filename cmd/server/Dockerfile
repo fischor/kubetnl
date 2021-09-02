@@ -1,12 +1,2 @@
-FROM golang:alpine AS builder
-# Git is required for fetching the dependencies.
-RUN apk update && apk add --no-cache git
-WORKDIR $GOPATH/src/mypackage/myapp/
-COPY . .
-RUN GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o /dew-server cmd/server/main.go
-RUN echo "Dew container running. Waiting for connections." >> /dew.log
-
-FROM alpine
-COPY --from=builder /dew-server /usr/local/bin/dew-server
-COPY --from=builder /dew.log /var/log/dew.log
-ENTRYPOINT tail -f /var/log/dew.log
+FROM ghcr.io/linuxserver/openssh-server@sha256:dff42d26d8fc782e4d9f37c09dedeaf50d0b77787ff5f38256d0a1e377407af9
+COPY ssh-init.sh /config/custom-cont-init.d/

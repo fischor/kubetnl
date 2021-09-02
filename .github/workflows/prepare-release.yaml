@@ -50,6 +50,6 @@ jobs:
           files: |
             bin/kubetnl-${{env.TAG}}_darwin-amd64/kubetnl
             bin/kubetnl-${{env.TAG}}_linux-amd64/kubetnl
-            bin/kubetnl-${{env.TAG}}_windows-amd64/kubetnl
+            bin/kubetnl-${{env.TAG}}_windows-amd64/kubetnl.exe
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

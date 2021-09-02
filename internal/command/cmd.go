@@ -51,9 +51,26 @@ func NewRootCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	f := cmdutil.NewFactory(kubeConfigFlags)
 	streams := genericclioptions.IOStreams{In: in, Out: out, ErrOut: err}
 
-	// Add subcommands.
-	cmd.AddCommand(NewCleanupCommand(f, streams))
-	cmd.AddCommand(NewTunnelCommand(f, streams))
+	// Wrapping the command within groups and using the
+	// templates.ActsAsRootCommand function will cmd to have a similiar
+	// look and feel like kubectl: Examples will be rendered correctly,
+	// global options not shown on every subcommand etc.
+	groups := templates.CommandGroups{
+		{
+			Message: "Basic commands",
+			Commands: []*cobra.Command{
+				NewTunnelCommand(f, streams),
+				NewCleanupCommand(f, streams),
+			},
+		},
+	}
+	groups.Add(cmd)
+
+	templates.ActsAsRootCommand(cmd, []string{}, groups...)
+
+	// Add subcommands not within any group.
+	cmd.AddCommand(NewVersionCommand(streams))
+	cmd.AddCommand(NewOptionsCommand(streams.Out))
 
 	return cmd
 }

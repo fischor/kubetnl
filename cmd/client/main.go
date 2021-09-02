@@ -9,7 +9,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	cmd := command.NewRootCommand(os.Stdin, os.Stdout, os.Stderr)
+	cmd := command.NewKubetnlCommand(os.Stdin, os.Stdout, os.Stderr)
 	if err := cmd.ExecuteContext(ctx); err != nil {
 		os.Exit(1)
 	}

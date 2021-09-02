@@ -1,4 +1,4 @@
-package command
+package options
 
 import (
 	"io"

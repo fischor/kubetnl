@@ -1,4 +1,4 @@
-package command
+package version
 
 import (
 	"fmt"
@@ -31,7 +31,7 @@ func NewVersionCommand(streams genericclioptions.IOStreams) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "version [--short]",
 		Short:   "Print the kubetnl version",
-		Example: cleanupExamples,
+		Example: versionExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			o.Run()
 		},

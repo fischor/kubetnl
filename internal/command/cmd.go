@@ -10,24 +10,15 @@ import (
 	"k8s.io/kubectl/pkg/util/templates"
 )
 
-type RootOptions struct{}
-
 var (
-	rootLong = templates.LongDesc("")
+	kubetnlLong = templates.LongDesc("")
 )
 
-// TODO: a global signal for graceful shutdown thats triggered on the first
-// CTRL+C would be nice.
-// context cancel shut be for KILL, since that also works for operations that
-// we do not control (API calls etc).
-
-func NewRootCommand(in io.Reader, out, err io.Writer) *cobra.Command {
-	_ = &RootOptions{}
-
+func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kubetnl",
 		Short: "Tunnel traffic received on pod to your local machine",
-		Long:  rootLong,
+		Long:  kubetnlLong,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmd.Help()
 		},

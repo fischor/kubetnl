@@ -4,6 +4,10 @@ import (
 	"flag"
 	"io"
 
+	"github.com/fischor/kubetnl/internal/command/cleanup"
+	"github.com/fischor/kubetnl/internal/command/options"
+	"github.com/fischor/kubetnl/internal/command/tunnel"
+	"github.com/fischor/kubetnl/internal/command/version"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
@@ -50,8 +54,8 @@ func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 		{
 			Message: "Basic commands",
 			Commands: []*cobra.Command{
-				NewTunnelCommand(f, streams),
-				NewCleanupCommand(f, streams),
+				tunnel.NewTunnelCommand(f, streams),
+				cleanup.NewCleanupCommand(f, streams),
 			},
 		},
 	}
@@ -60,8 +64,8 @@ func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	templates.ActsAsRootCommand(cmd, []string{}, groups...)
 
 	// Add subcommands not within any group.
-	cmd.AddCommand(NewVersionCommand(streams))
-	cmd.AddCommand(NewOptionsCommand(streams.Out))
+	cmd.AddCommand(version.NewVersionCommand(streams))
+	cmd.AddCommand(options.NewOptionsCommand(streams.Out))
 
 	return cmd
 }

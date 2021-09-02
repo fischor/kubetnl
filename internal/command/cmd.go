@@ -18,7 +18,7 @@ var (
 	kubetnlShort = "Tunnel connections from within a k8s cluster to an external endpoint."
 
 	kubetnlLong = templates.LongDesc(`
-                kubetnl tunnels TCP connections from within a Kubernetes cluster to an arbitrary external endpoint.
+                kubetnl tunnels TCP connections from within a Kubernetes cluster to an external endpoint.
 
                 Find more information and check out the souce code at: https://github.com/fischor/kubetnl`)
 )

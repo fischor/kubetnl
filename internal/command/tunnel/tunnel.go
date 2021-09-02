@@ -68,8 +68,7 @@ var (
 		Setup a new tunnel.
 
 		A tunnel forwards connections directed to a Kubernetes Service port within a
-		cluster to an arbitrary endpoint outside of the cluster, e.g. to your local
-		machine.
+		cluster to an endpoint outside of the cluster, e.g. to your local machine.
 
 		Under the hood "kubetnl tunnel" creates a new service and pod that expose the 
 		specified ports. Any incoming connections to an exposed port of the newly created 

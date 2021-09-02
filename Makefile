@@ -21,3 +21,6 @@ version:
 	echo ${VERSION}
 
 release: clean windows linux darwin
+	zip -r bin/kubetnl-$(VERSION)_windows-amd64.zip bin/kubetnl-$(VERSION)_windows-amd64
+	zip -r bin/kubetnl-$(VERSION)_linux-amd64.zip bin/kubetnl-$(VERSION)_linux-amd64
+	zip -r bin/kubetnl-$(VERSION)_darwin-amd64.zip bin/kubetnl-$(VERSION)_darwin-amd64

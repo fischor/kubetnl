@@ -39,7 +39,7 @@ jobs:
             echo "Versions do not match: $TAG != v$VERSION"
             exit 1;
           fi
-
+      
       - name: Release Notes
         run: git log $(git describe HEAD~ --tags --abbrev=0)..HEAD --pretty='format:* %h %s%n  * %an <%ae>' --no-merges >> ".github/RELEASE-TEMPLATE.md"
       - name: Create Release Draft
@@ -48,8 +48,8 @@ jobs:
           body_path: ".github/RELEASE-TEMPLATE.md"
           draft: true
           files: |
-            bin/kubetnl-${{env.TAG}}_darwin-amd64/kubetnl
-            bin/kubetnl-${{env.TAG}}_linux-amd64/kubetnl
-            bin/kubetnl-${{env.TAG}}_windows-amd64/kubetnl.exe
+            bin/kubetnl-${{env.TAG}}_darwin-amd64.zip
+            bin/kubetnl-${{env.TAG}}_linux-amd64.zip
+            bin/kubetnl-${{env.TAG}}_windows-amd64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

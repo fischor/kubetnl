@@ -7,7 +7,42 @@ You can think of it as doing the opposite of `kubectl port-forward`.
 
 ![kubetnl-demo.gif](https://gist.githubusercontent.com/fischor/6d175f01db8ded817d5fc72dcd37811e/raw/d5a708324354b49fa5dd15c47f9fd52287c394e1/kubetnl.gif)
 
-## `kubetnl --help`
+## How does it work
+
+When a new tunnel with `kubetnl tunnel myservice 8080:8080 9090:9090 5.5.5.5:80:8888` is created, kubetnl will create a Service and a Pod with name "myservice" in your cluster.
+The pod will expose port 8080, 9090, 8888 and another random port for the tunnel.
+The service will target port 8080, 9090 and 8888 of the pod.
+
+Once the pod is running, a connection to the pods exposed port for tunneling is established via pod portforwarding.
+Using the established connection to the pod, kubetnl opens a tunnel on the pod causing it to forward any incoming connections on port 8080, 9090 and 8888 to the kubetnl binary.
+From the kubetnl binary, the connections are then forwarded to their specified target endpoints.
+
+## Installation
+
+### Install using `go install`
+
+If you have Go installed, you can simply run
+
+```
+go install github.com/fischor/kubetnl@latest
+```
+
+to install the latest version of kubetnl. 
+You can replace latest with the version tag you want to install, e.g. `v0.1.1`.
+
+### Install by picking a relase
+
+Go the the [release section](https://github.com/fischor/kubetnl/releases) and pick the binary for your operation system and architecture and add it to your PATH.
+
+## Prerequisities
+
+For kubetnl to work, you need to have privilidges the create services and pods and to do portforwarding on pods. 
+Your cluster must also be able to pull the docker.io/fischor/kubetnl-server image. 
+
+
+## Commands
+
+### `kubetnl --help`
 
 ```sh
 $ kubetnl --help
@@ -30,7 +65,7 @@ Use "kubetnl <command> --help" for more information about a given command.
 Use "kubetnl options" for a list of global command-line options (applies to all commands).
 ```
 
-## `kubetnl tunnel --help`
+### `kubetnl tunnel --help`
 
 ```sh
 $ kubetnl tunnel --help
@@ -78,7 +113,7 @@ Since you are probably here in search for tools that allow you to forward traffi
 
 You still might choose `kubetnl` because:
 
-With Telepresence, you need a to setup a Deployment manually before anything can be forwarded. Telepresence will then inject sidecar containers into the pods of that Deployment that are responsible for forwarding connections. `kubetnl` on the other hand creates a new service and pod for you, so no Deployment needs to be set up before.
+With Telepresence, you need a to setup a Deployment manually before anything can be forwarded. Telepresence will then inject sidecar containers into the pods of that Deployment that are responsible for forwarding connections. `kubetnl` on the other hand creates a new service and pod for you, so there is no need to setup anything before the tunnel can be opened.
 
 Telepresence will have to create a new namespace with a *Traffic manager* deployment (but setting it up and tearing it down is super easy) before anything can be forwarded. With `kubectl` there is no extra setup needed.
 

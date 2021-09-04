@@ -175,7 +175,8 @@ func (o *TunnelOptions) Run(parent context.Context) error {
 		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
 		err := serviceClient.Delete(ctx, service.Name, deleteOptions)
 		if err != nil {
-			klog.Warningf("Cleanup: error deleting service: %v", err)
+			klog.V(1).Info("Cleanup: error deleting service: %v", err)
+			fmt.Fprintf(o.ErrOut, "Failed to delete service %q. Use \"kubetnl cleanup\" to delete any leftover resources created by kubetnl.\n", o.Name)
 		}
 	})
 
@@ -207,7 +208,8 @@ func (o *TunnelOptions) Run(parent context.Context) error {
 		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
 		err := podClient.Delete(ctx, pod.Name, deleteOptions)
 		if err != nil {
-			klog.Warningf("tunnel Cleanup: error deleting pod: %v. That pod probably still runs. You can use kubetnl cleanup to clean up all resources created by kubetnl.", err)
+			klog.V(1).Infof("tunnel Cleanup: error deleting pod: %v. That pod probably still runs. You can use kubetnl cleanup to clean up all resources created by kubetnl.", err)
+			fmt.Fprintf(o.ErrOut, "Failed to delete pod %q. Use \"kubetnl cleanup\" to delete any leftover resources created by kubetnl.\n", o.Name)
 		}
 	})
 

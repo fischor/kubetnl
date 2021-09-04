@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/fischor/kubetnl/internal/interruptcontext"
+	"github.com/fischor/kubetnl/internal/graceful"
 	"github.com/fischor/kubetnl/internal/port"
 	"github.com/fischor/kubetnl/internal/portforward"
 	"github.com/spf13/cobra"
@@ -110,8 +110,10 @@ func NewTunnelCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *c
 		Example: tunnelExample,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f, cmd, args))
-			ctx, graceCh := interruptcontext.WithGrafulInterrupt(cmd.Context())
-			cmdutil.CheckErr(o.Run(ctx, graceCh))
+			err := o.Run(cmd.Context())
+			if err != graceful.Interrupted {
+				cmdutil.CheckErr(err)
+			}
 		},
 	}
 
@@ -149,7 +151,12 @@ func (o *TunnelOptions) Complete(f cmdutil.Factory, cmd *cobra.Command, args []s
 	return nil
 }
 
-func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error {
+func (o *TunnelOptions) Run(parent context.Context) error {
+	ctx, cancel := graceful.WithKill(parent)
+	defer cancel()
+	interruptCtx, interruptCancel := graceful.WithInterrupt(ctx)
+	defer interruptCancel()
+
 	// Create the service for incoming traffic within the cluster. The
 	// services accepts traffic on all ports that are in mentioned in
 	// o.PortMappings[*].ContainerPortNumber using the specied protocol.
@@ -162,7 +169,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		return fmt.Errorf("error creating service: %v", err)
 	}
 	klog.V(3).Infof("Created service \"%s\".", service.GetObjectMeta().GetName())
-	defer interruptcontext.DoGraceful(ctx, func() {
+	defer graceful.Do(ctx, func() {
 		klog.V(2).Infof("Cleanup: deleting service %s ...", service.Name)
 		deletePolicy := metav1.DeletePropagationForeground
 		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
@@ -173,8 +180,8 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	})
 
 	select {
-	case <-graceCh:
-		return interruptcontext.Interrupted
+	case <-interruptCtx.Done():
+		return graceful.Interrupted
 	default:
 	}
 
@@ -194,7 +201,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		return fmt.Errorf("error creating pod: %v", err)
 	}
 	klog.V(3).Infof("Created pod \"%s\".", service.GetObjectMeta().GetName())
-	defer interruptcontext.DoGraceful(ctx, func() {
+	defer graceful.Do(ctx, func() {
 		klog.V(2).Infof("Cleanup: deleting pod %s ...", pod.Name)
 		deletePolicy := metav1.DeletePropagationForeground
 		deleteOptions := metav1.DeleteOptions{PropagationPolicy: &deletePolicy}
@@ -205,8 +212,8 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	})
 
 	select {
-	case <-graceCh:
-		return interruptcontext.Interrupted
+	case <-interruptCtx.Done():
+		return graceful.Interrupted
 	default:
 	}
 
@@ -218,14 +225,16 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	if err != nil {
 		return fmt.Errorf("error watching pod %s: %v", o.Name, err)
 	}
-	// TODO In case of graceful interrupt, wcancel() and return cmd.ErrInterrupted
-	// if err == wctx.Err (== context.Cancelled).
-	wctx, wcancel := watchtools.ContextWithOptionalTimeout(context.Background(), 5*time.Minute)
-	_, err = watchtools.UntilWithoutRetry(wctx, podWatch, condPodReady)
-	wcancel()
+	_, err = watchtools.UntilWithoutRetry(interruptCtx, podWatch, condPodReady)
 	if err != nil {
 		if err == watchtools.ErrWatchClosed {
 			return fmt.Errorf("error waiting for pod ready: podWatch has been closed before pod ready event received")
+		}
+		// err will be wait.ErrWatchClosed is the context passed to
+		// watchtools.UntilWithoutRetry is done. However, if the interrupt
+		// context was canceled, return an graceful.Interrupted.
+		if interruptCtx.Err() != nil {
+			return graceful.Interrupted
 		}
 		if err == wait.ErrWaitTimeout {
 			return fmt.Errorf("error waiting for pod ready: timed out after %d seconds", 300)
@@ -234,11 +243,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	}
 	klog.V(2).Infof("Pod ready..\n")
 
-	select {
-	case <-graceCh:
-		return interruptcontext.Interrupted
-	default:
-	}
+	// Setup portforwarding to the pod.
 	pfwdReadyCh := make(chan struct{})   // Closed when portforwarding ready.
 	pfwdStopCh := make(chan struct{}, 1) // is never closed by k8sportforward
 	pfwdDoneCh := make(chan struct{})    // Closed when portforwarding exits.
@@ -270,7 +275,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 		close(pfwdDoneCh)
 		return nil
 	}()
-	defer interruptcontext.DoGraceful(ctx, func() {
+	defer graceful.Do(ctx, func() {
 		close(pfwdStopCh)
 		<-pfwdDoneCh
 		klog.V(2).Infof("Cleanup: port-forwarding closed")
@@ -279,8 +284,8 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
-	case <-graceCh:
-		return interruptcontext.Interrupted
+	case <-interruptCtx.Done():
+		return graceful.Interrupted
 	case <-pfwdReadyCh:
 		// Note that having a ready pfwd just means that it is listening
 		// on o.LocalSSHPort.
@@ -299,40 +304,40 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 	// Retry establishing the connection in case of failure every second.
 	sshAddr := fmt.Sprintf("localhost:%d", o.LocalSSHPort)
 	var sshClient *ssh.Client
-	var sshErr error
-	sshCtx, sshCancel := context.WithCancel(ctx)
-	defer sshCancel()
-	go func() {
-		<-graceCh
-		sshCancel()
-		// TODO(fischor): avoid goroutines leaks.
-	}()
 	sshAttempts := 0
-	err = wait.PollImmediateUntil(time.Second, func() (bool, error) {
+	err = wait.PollImmediateInfinite(time.Second, func() (bool, error) {
 		sshAttempts++
-		sshClient, sshErr = sshDialContext(sshCtx, "tcp", sshAddr, o.sshConfig())
-		if sshErr != nil {
-			if sshAttempts > 3 {
-				fmt.Fprintf(o.Out, "failed to dial ssh: %v. Retrying...\n", sshErr)
+		var err error
+		sshClient, err = sshDialContext(interruptCtx, "tcp", sshAddr, o.sshConfig())
+		if err != nil {
+			// HACK: net.DialContext does neither return nor wraps
+			// the context.Canceled error. Checking if the error
+			// was probably caused by a canceled context. See
+			// <https://github.com/golang/go/issues/36208>.
+			if interruptCtx.Err() != nil {
+				return false, interruptCtx.Err()
 			}
-			klog.V(1).Infof("error dialing ssh (%s): %v", sshAddr, sshErr)
+			if sshAttempts > 3 {
+				fmt.Fprintf(o.Out, "failed to dial ssh: %v. Retrying...\n", err)
+			}
+			klog.V(1).Infof("error dialing ssh (%s): %v", sshAddr, err)
 		}
-		return sshErr == nil, nil
+		return err == nil, nil
 
-	}, graceCh)
-	if err == wait.ErrWaitTimeout {
-		// Grace channel has been closed (after the first attempt to
-		// connect has been done).
-		return interruptcontext.Interrupted
-	}
+	})
 	if err != nil {
-		// A non-retryable error from the shh connection has been returned.
+		if err == interruptCtx.Err() {
+			klog.V(2).Info("Interrupted while establishing SSH connection")
+			return graceful.Interrupted
+		}
+		// Should not happen since we retry on all errors except for
+		// the interruptCtx.Err().
 		return fmt.Errorf("error dialing ssh: %v", err)
 	}
 	klog.V(2).Infof("SSH connection (%s) ready", sshAddr)
-	defer interruptcontext.DoGraceful(ctx, func() {
+	defer graceful.Do(ctx, func() {
 		sshClient.Close()
-		klog.V(2).Info("Cleanup: ssh connection (%s) closed", sshAddr)
+		klog.V(2).Infof("Cleanup: ssh connection (%s) closed", sshAddr)
 	})
 
 	// Setup tunnels.
@@ -379,7 +384,7 @@ func (o *TunnelOptions) Run(ctx context.Context, graceCh <-chan struct{}) error 
 					p.f.Close()
 				}
 			}
-		case <-graceCh:
+		case <-interruptCtx.Done():
 			for _, p := range pairs {
 				p.f.Close()
 			}
@@ -501,8 +506,6 @@ func protocolToCoreV1(p port.Protocol) corev1.Protocol {
 	return corev1.ProtocolTCP
 }
 
-// waitService is a watchtools.ConditionFunc. Waits for the service to have one
-// pod attached.
 func condPodReady(event watch.Event) (bool, error) {
 	pod := event.Object.(*corev1.Pod)
 	for _, cond := range pod.Status.Conditions {

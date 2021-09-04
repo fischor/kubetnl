@@ -66,8 +66,9 @@ var (
 
 func NewCleanupCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *cobra.Command {
 	o := &CleanupOptions{
-		IOStreams:   streams,
-		GracePeriod: -1,
+		IOStreams:       streams,
+		GracePeriod:     -1,
+		WaitForDeletion: true,
 	}
 
 	cmd := &cobra.Command{
@@ -77,14 +78,15 @@ func NewCleanupCommand(f cmdutil.Factory, streams genericclioptions.IOStreams) *
 		Example: cleanupExamples,
 		Run: func(cmd *cobra.Command, args []string) {
 			cmdutil.CheckErr(o.Complete(f))
+			cmdutil.CheckErr(o.Validate())
 			cmdutil.CheckErr(o.Run(cmd.Context()))
 		},
 	}
 
-	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", false, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
-	cmd.Flags().BoolVar(&o.ForceDeletion, "force", false, "If true, immediately remove resources from API and bypass graceful deletion. Note that immediate deletion of some resources may result in inconsistency or data loss and requires confirmation.")
-	cmd.Flags().IntVar(&o.GracePeriod, "grace-period", 0, "Period of time in seconds given to the resource to terminate gracefully. Ignored if negative. Set to 1 for immediate shutdown. Can only be set to 0 when --force is true (force deletion).")
-	cmd.Flags().BoolVar(&o.WaitForDeletion, "wait", true, "If true, wait for resources to be gone before returning. This waits for finalizers.")
+	cmd.Flags().BoolVarP(&o.AllNamespaces, "all-namespaces", "A", o.AllNamespaces, "If present, list the requested object(s) across all namespaces. Namespace in current context is ignored even if specified with --namespace.")
+	cmd.Flags().BoolVar(&o.ForceDeletion, "force", o.ForceDeletion, "If true, immediately remove resources from API and bypass graceful deletion. Note that immediate deletion of some resources may result in inconsistency or data loss and requires confirmation.")
+	cmd.Flags().IntVar(&o.GracePeriod, "grace-period", o.GracePeriod, "Period of time in seconds given to the resource to terminate gracefully. Ignored if negative. Set to 1 for immediate shutdown. Can only be set to 0 when --force is true (force deletion).")
+	cmd.Flags().BoolVar(&o.WaitForDeletion, "wait", o.WaitForDeletion, "If true, wait for resources to be gone before returning. This waits for finalizers.")
 	// TODO quiet flag
 
 	return cmd

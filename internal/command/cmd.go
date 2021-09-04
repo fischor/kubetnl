@@ -10,6 +10,8 @@ import (
 	"github.com/fischor/kubetnl/internal/command/version"
 	"github.com/spf13/cobra"
 	"k8s.io/cli-runtime/pkg/genericclioptions"
+	cliflag "k8s.io/component-base/cli/flag"
+	"k8s.io/klog/v2"
 	cmdutil "k8s.io/kubectl/pkg/cmd/util"
 	"k8s.io/kubectl/pkg/util/templates"
 )
@@ -33,6 +35,11 @@ func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 		},
 	}
 
+	// Normalize flags that use "_" as word separators to using "-". E.g.
+	// the flags for klog.
+	cmd.PersistentFlags().SetNormalizeFunc(cliflag.WarnWordSepNormalizeFunc)
+	cmd.PersistentFlags().SetNormalizeFunc(cliflag.WordSepNormalizeFunc)
+
 	// Adds the following global flags:
 	//
 	// 	"kubeconfig" "cluster" "user" "context" "namespace" "server"
@@ -44,6 +51,8 @@ func NewKubetnlCommand(in io.Reader, out, err io.Writer) *cobra.Command {
 	// These flags are used by the cmdutil.Factory.
 	kubeConfigFlags := genericclioptions.NewConfigFlags(true)
 	kubeConfigFlags.AddFlags(cmd.PersistentFlags())
+
+	klog.InitFlags(flag.CommandLine)
 	cmd.PersistentFlags().AddGoFlagSet(flag.CommandLine)
 
 	f := cmdutil.NewFactory(kubeConfigFlags)
